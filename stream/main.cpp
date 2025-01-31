@@ -7,6 +7,7 @@
 #include <atomic>
 #include <mutex>
 #include <queue>
+#include <map>
 
 // 音频缓冲队列
 struct AudioBuffer {
@@ -15,21 +16,66 @@ struct AudioBuffer {
     static const int MAX_SIZE = 100;  // 最大缓冲数量
 };
 
+// whisper参数结构体
+struct WhisperParams {
+    std::string language = "zh";      // 输入语言
+    std::string translate_to = "";    // 翻译目标语言
+    bool translate = false;           // 是否翻译
+    bool no_timestamps = true;        // 是否显示时间戳
+    int threads = 4;                  // 线程数
+    int max_tokens = 32;             // 最大token数
+    bool use_gpu = true;             // 是否使用GPU
+    float vad_thold = 0.6f;          // VAD阈值
+    bool print_special = false;       // 是否打印特殊标记
+    int step_ms = 3000;              // 音频步长(ms)
+    int length_ms = 10000;           // 音频长度(ms)
+};
+
+// 语言代码映射
+const std::map<std::string, std::string> LANGUAGE_CODES = {
+    {"auto", "auto"}, {"en", "english"}, {"zh", "chinese"}, {"ja", "japanese"},
+    {"ko", "korean"}, {"fr", "french"}, {"de", "german"}, {"es", "spanish"},
+    {"ru", "russian"}, {"it", "italian"}
+};
+
 // 全局变量
 AudioBuffer g_audio_buffer;
 std::atomic<bool> g_is_running{true};
+WhisperParams g_params;
 
 // 显示帮助信息
 void show_usage(const char* program) {
     fprintf(stderr, "Usage: %s [options] <model_path>\n", program);
-    fprintf(stderr, "\nOptions:\n");
-    fprintf(stderr, "  -h,  --help            显示帮助信息\n");
-    fprintf(stderr, "  -l,  --list            列出可用的音频程序\n");
-    fprintf(stderr, "  -p,  --pid <pid>       捕获指定PID的程序音频\n");
+    fprintf(stderr, "\n音频捕获选项:\n");
+    fprintf(stderr, "  -h,  --help                显示帮助信息\n");
+    fprintf(stderr, "  -l,  --list                列出可用的音频程序\n");
+    fprintf(stderr, "  -p,  --pid <pid>           捕获指定PID的程序音频\n");
+    fprintf(stderr, "\nWhisper选项:\n");
+    fprintf(stderr, "  -t,  --threads <n>         使用的线程数 (默认: 4)\n");
+    fprintf(stderr, "  -mt, --max-tokens <n>      最大token数 (默认: 32)\n");
+    fprintf(stderr, "  -ng, --no-gpu             禁用GPU加速\n");
+    fprintf(stderr, "  -l,  --language <lang>     输入音频语言 (默认: zh)\n");
+    fprintf(stderr, "  -tr, --translate           启用翻译\n");
+    fprintf(stderr, "  -tt, --translate-to <lang> 翻译目标语言 (默认: en)\n");
+    fprintf(stderr, "  -ts, --timestamps          显示时间戳\n");
+    fprintf(stderr, "  -ps, --print-special       显示特殊标记\n");
+    fprintf(stderr, "  -vt, --vad-thold <n>       VAD阈值 [0-1] (默认: 0.6)\n");
+    fprintf(stderr, "  -sm, --step-ms <n>         音频步长(ms) (默认: 3000)\n");
+    fprintf(stderr, "  -lm, --length-ms <n>       音频长度(ms) (默认: 10000)\n");
+    fprintf(stderr, "\n支持的语言:\n");
+    for (const auto& lang : LANGUAGE_CODES) {
+        fprintf(stderr, "  %-6s : %s\n", lang.first.c_str(), lang.second.c_str());
+    }
     fprintf(stderr, "\nExample:\n");
-    fprintf(stderr, "  %s --list                      # 列出可用音频程序\n", program);
-    fprintf(stderr, "  %s models/ggml-base.bin        # 捕获系统音频\n", program);
-    fprintf(stderr, "  %s -p 1234 models/ggml-base.bin # 捕获PID为1234的程序音频\n", program);
+    fprintf(stderr, "  %s --list                                    # 列出可用音频程序\n", program);
+    fprintf(stderr, "  %s models/ggml-base.bin                      # 捕获系统音频\n", program);
+    fprintf(stderr, "  %s -p 1234 --language en models/ggml-base.bin # 捕获PID为1234的英语音频\n", program);
+    fprintf(stderr, "  %s --translate --translate-to ja models/ggml-base.bin # 翻译成日语\n", program);
+}
+
+// 验证语言代码
+bool is_valid_language(const std::string& lang) {
+    return LANGUAGE_CODES.find(lang) != LANGUAGE_CODES.end();
 }
 
 // 列出可用的音频程序
@@ -71,14 +117,20 @@ void whisper_processing_thread(struct whisper_context* ctx) {
     // whisper参数设置
     whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     wparams.print_progress = false;
-    wparams.print_special = false;
+    wparams.print_special = g_params.print_special;
     wparams.print_realtime = true;
-    wparams.print_timestamps = true;
-    wparams.translate = false;
+    wparams.print_timestamps = !g_params.no_timestamps;
+    wparams.translate = g_params.translate;
+    wparams.language = g_params.language.c_str();
+    wparams.n_threads = g_params.threads;
+    wparams.max_tokens = g_params.max_tokens;
     wparams.single_segment = true;
-    wparams.max_tokens = 32;
-    wparams.language = "zh";
-    wparams.n_threads = 4;
+
+    // 如果指定了翻译目标语言
+    if (!g_params.translate_to.empty()) {
+        wparams.translate = true;
+        wparams.language = g_params.translate_to.c_str();
+    }
 
     std::vector<float> audio_data;
     const int n_samples_30s = 30 * WHISPER_SAMPLE_RATE;
@@ -95,7 +147,7 @@ void whisper_processing_thread(struct whisper_context* ctx) {
         }
 
         // 当累积足够的音频数据时进行处理
-        if (audio_data.size() >= WHISPER_SAMPLE_RATE * 3) {  // 处理3秒的音频
+        if (audio_data.size() >= WHISPER_SAMPLE_RATE * (g_params.step_ms / 1000)) {
             if (whisper_full(ctx, wparams, audio_data.data(), audio_data.size()) != 0) {
                 fprintf(stderr, "Failed to process audio\n");
                 continue;
@@ -105,7 +157,16 @@ void whisper_processing_thread(struct whisper_context* ctx) {
             const int n_segments = whisper_full_n_segments(ctx);
             for (int i = 0; i < n_segments; ++i) {
                 const char* text = whisper_full_get_segment_text(ctx, i);
-                printf("%s", text);
+                if (g_params.no_timestamps) {
+                    printf("%s", text);
+                } else {
+                    const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
+                    const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+                    printf("[%d:%02d.%03d -> %d:%02d.%03d] %s\n",
+                        (int)(t0 / 60000), (int)((t0 / 1000) % 60), (int)(t0 % 1000),
+                        (int)(t1 / 60000), (int)((t1 / 1000) % 60), (int)(t1 % 1000),
+                        text);
+                }
                 fflush(stdout);
             }
             printf("\n");
@@ -142,6 +203,53 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+        else if (arg == "-t" || arg == "--threads") {
+            if (i + 1 < argc) g_params.threads = std::stoi(argv[++i]);
+        }
+        else if (arg == "-mt" || arg == "--max-tokens") {
+            if (i + 1 < argc) g_params.max_tokens = std::stoi(argv[++i]);
+        }
+        else if (arg == "-ng" || arg == "--no-gpu") {
+            g_params.use_gpu = false;
+        }
+        else if (arg == "-l" || arg == "--language") {
+            if (i + 1 < argc) {
+                std::string lang = argv[++i];
+                if (!is_valid_language(lang)) {
+                    fprintf(stderr, "Error: 不支持的语言代码: %s\n", lang.c_str());
+                    return 1;
+                }
+                g_params.language = lang;
+            }
+        }
+        else if (arg == "-tr" || arg == "--translate") {
+            g_params.translate = true;
+        }
+        else if (arg == "-tt" || arg == "--translate-to") {
+            if (i + 1 < argc) {
+                std::string lang = argv[++i];
+                if (!is_valid_language(lang)) {
+                    fprintf(stderr, "Error: 不支持的目标语言代码: %s\n", lang.c_str());
+                    return 1;
+                }
+                g_params.translate_to = lang;
+            }
+        }
+        else if (arg == "-ts" || arg == "--timestamps") {
+            g_params.no_timestamps = false;
+        }
+        else if (arg == "-ps" || arg == "--print-special") {
+            g_params.print_special = true;
+        }
+        else if (arg == "-vt" || arg == "--vad-thold") {
+            if (i + 1 < argc) g_params.vad_thold = std::stof(argv[++i]);
+        }
+        else if (arg == "-sm" || arg == "--step-ms") {
+            if (i + 1 < argc) g_params.step_ms = std::stoi(argv[++i]);
+        }
+        else if (arg == "-lm" || arg == "--length-ms") {
+            if (i + 1 < argc) g_params.length_ms = std::stoi(argv[++i]);
+        }
         else if (!model_path && arg[0] != '-') {
             model_path = argv[i];
         }
@@ -177,12 +285,28 @@ int main(int argc, char** argv) {
 
     // 初始化whisper
     struct whisper_context_params cparams = whisper_context_default_params();
+    cparams.use_gpu = g_params.use_gpu;
     struct whisper_context* ctx = whisper_init_from_file_with_params(model_path, cparams);
     if (ctx == nullptr) {
         fprintf(stderr, "Failed to initialize whisper\n");
         wasapi_capture_destroy(capture);
         return 1;
     }
+
+    // 打印当前设置
+    printf("\n当前设置:\n");
+    printf("----------------------------------------\n");
+    printf("输入语言: %s\n", LANGUAGE_CODES.at(g_params.language).c_str());
+    if (g_params.translate) {
+        printf("翻译: 开启\n");
+        if (!g_params.translate_to.empty()) {
+            printf("翻译目标语言: %s\n", LANGUAGE_CODES.at(g_params.translate_to).c_str());
+        }
+    }
+    printf("线程数: %d\n", g_params.threads);
+    printf("GPU加速: %s\n", g_params.use_gpu ? "开启" : "关闭");
+    printf("时间戳: %s\n", g_params.no_timestamps ? "关闭" : "开启");
+    printf("----------------------------------------\n\n");
 
     // 设置音频回调
     wasapi_capture_set_callback(capture, (audio_callback)audio_data_callback, &g_audio_buffer);

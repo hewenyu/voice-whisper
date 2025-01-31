@@ -8,27 +8,49 @@
 #include <mutex>
 #include <queue>
 #include <map>
+#include <fcntl.h>
+#include <io.h>
+
+// 设置控制台UTF-8输出
+void set_console_utf8() {
+#ifdef _WIN32
+    // 设置控制台代码页为UTF-8
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+
+    // 启用控制台的虚拟终端序列
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD dwMode = 0;
+    GetConsoleMode(hOut, &dwMode);
+    SetConsoleMode(hOut, dwMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+
+    // 设置标准输出为UTF-8
+    _setmode(_fileno(stdout), _O_U8TEXT);
+    _setmode(_fileno(stderr), _O_U8TEXT);
+#endif
+}
 
 // 音频缓冲队列
 struct AudioBuffer {
     std::mutex mtx;
     std::queue<std::vector<float>> queue;
     static const int MAX_SIZE = 100;  // 最大缓冲数量
+    int sample_rate = 48000;          // 默认采样率，将在初始化时更新
 };
 
 // whisper参数结构体
 struct WhisperParams {
-    std::string language = "zh";      // 输入语言
+    std::string language = "auto";      // 输入语言
     std::string translate_to = "";    // 翻译目标语言
     bool translate = false;           // 是否翻译
     bool no_timestamps = true;        // 是否显示时间戳
-    int threads = 4;                  // 线程数
+    int threads = 8;                  // 线程数
     int max_tokens = 32;             // 最大token数
-    bool use_gpu = true;             // 是否使用GPU
+    bool use_gpu = false;             // 是否使用GPU
     float vad_thold = 0.6f;          // VAD阈值
     bool print_special = false;       // 是否打印特殊标记
-    int step_ms = 3000;              // 音频步长(ms)
-    int length_ms = 10000;           // 音频长度(ms)
+    int step_ms = 500;               // 音频步长(ms)
+    int length_ms = 5000;            // 音频长度(ms)
 };
 
 // 语言代码映射
@@ -45,32 +67,44 @@ WhisperParams g_params;
 
 // 显示帮助信息
 void show_usage(const char* program) {
-    fprintf(stderr, "Usage: %s [options] <model_path>\n", program);
-    fprintf(stderr, "\n音频捕获选项:\n");
-    fprintf(stderr, "  -h,  --help                显示帮助信息\n");
-    fprintf(stderr, "  -l,  --list                列出可用的音频程序\n");
-    fprintf(stderr, "  -p,  --pid <pid>           捕获指定PID的程序音频\n");
-    fprintf(stderr, "\nWhisper选项:\n");
-    fprintf(stderr, "  -t,  --threads <n>         使用的线程数 (默认: 4)\n");
-    fprintf(stderr, "  -mt, --max-tokens <n>      最大token数 (默认: 32)\n");
-    fprintf(stderr, "  -ng, --no-gpu             禁用GPU加速\n");
-    fprintf(stderr, "  -l,  --language <lang>     输入音频语言 (默认: zh)\n");
-    fprintf(stderr, "  -tr, --translate           启用翻译\n");
-    fprintf(stderr, "  -tt, --translate-to <lang> 翻译目标语言 (默认: en)\n");
-    fprintf(stderr, "  -ts, --timestamps          显示时间戳\n");
-    fprintf(stderr, "  -ps, --print-special       显示特殊标记\n");
-    fprintf(stderr, "  -vt, --vad-thold <n>       VAD阈值 [0-1] (默认: 0.6)\n");
-    fprintf(stderr, "  -sm, --step-ms <n>         音频步长(ms) (默认: 3000)\n");
-    fprintf(stderr, "  -lm, --length-ms <n>       音频长度(ms) (默认: 10000)\n");
-    fprintf(stderr, "\n支持的语言:\n");
+    // 转换程序名为宽字符
+    int len = MultiByteToWideChar(CP_UTF8, 0, program, -1, NULL, 0);
+    std::vector<wchar_t> wprogram(len);
+    MultiByteToWideChar(CP_UTF8, 0, program, -1, wprogram.data(), len);
+
+    fwprintf(stderr, L"Usage: %ls [options] <model_path>\n", wprogram.data());
+    fwprintf(stderr, L"\n音频捕获选项:\n");
+    fwprintf(stderr, L"  -h,  --help                显示帮助信息\n");
+    fwprintf(stderr, L"  -l,  --list                列出可用的音频程序\n");
+    fwprintf(stderr, L"  -p,  --pid <pid>           捕获指定PID的程序音频\n");
+    fwprintf(stderr, L"\nWhisper选项:\n");
+    fwprintf(stderr, L"  -t,  --threads <n>         使用的线程数 (默认: 8)\n");
+    fwprintf(stderr, L"  -mt, --max-tokens <n>      最大token数 (默认: 32)\n");
+    fwprintf(stderr, L"  -ng, --no-gpu             禁用GPU加速\n");
+    fwprintf(stderr, L"  -l,  --language <lang>     输入音频语言 (默认: zh)\n");
+    fwprintf(stderr, L"  -tr, --translate           启用翻译\n");
+    fwprintf(stderr, L"  -tt, --translate-to <lang> 翻译目标语言 (默认: en)\n");
+    fwprintf(stderr, L"  -ts, --timestamps          显示时间戳\n");
+    fwprintf(stderr, L"  -ps, --print-special       显示特殊标记\n");
+    fwprintf(stderr, L"  -vt, --vad-thold <n>       VAD阈值 [0-1] (默认: 0.6)\n");
+    fwprintf(stderr, L"  -sm, --step-ms <n>         音频步长(ms) (默认: 500)\n");
+    fwprintf(stderr, L"  -lm, --length-ms <n>       音频长度(ms) (默认: 5000)\n");
+    fwprintf(stderr, L"\n支持的语言:\n");
+    
     for (const auto& lang : LANGUAGE_CODES) {
-        fprintf(stderr, "  %-6s : %s\n", lang.first.c_str(), lang.second.c_str());
+        // 转换语言名称为宽字符
+        len = MultiByteToWideChar(CP_UTF8, 0, lang.second.c_str(), -1, NULL, 0);
+        std::vector<wchar_t> wlang(len);
+        MultiByteToWideChar(CP_UTF8, 0, lang.second.c_str(), -1, wlang.data(), len);
+        
+        fwprintf(stderr, L"  %-6hs : %ls\n", lang.first.c_str(), wlang.data());
     }
-    fprintf(stderr, "\nExample:\n");
-    fprintf(stderr, "  %s --list                                    # 列出可用音频程序\n", program);
-    fprintf(stderr, "  %s models/ggml-base.bin                      # 捕获系统音频\n", program);
-    fprintf(stderr, "  %s -p 1234 --language en models/ggml-base.bin # 捕获PID为1234的英语音频\n", program);
-    fprintf(stderr, "  %s --translate --translate-to ja models/ggml-base.bin # 翻译成日语\n", program);
+    
+    fwprintf(stderr, L"\nExample:\n");
+    fwprintf(stderr, L"  %ls --list                                    # 列出可用音频程序\n", wprogram.data());
+    fwprintf(stderr, L"  %ls models/ggml-base.bin                      # 捕获系统音频\n", wprogram.data());
+    fwprintf(stderr, L"  %ls -p 1234 --language en models/ggml-base.bin # 捕获PID为1234的英语音频\n", wprogram.data());
+    fwprintf(stderr, L"  %ls --translate --translate-to ja models/ggml-base.bin # 翻译成日语\n", wprogram.data());
 }
 
 // 验证语言代码
@@ -86,19 +120,19 @@ void list_audio_applications(void* capture) {
     int count = wasapi_capture_get_applications(capture, apps, MAX_APPS);
     
     if (count == 0) {
-        printf("没有找到正在播放音频的程序\n");
+        wprintf(L"没有找到正在播放音频的程序\n");
         return;
     }
     
-    printf("\n可用的音频程序列表：\n");
-    printf("----------------------------------------\n");
-    printf("PID\t程序路径\n");
-    printf("----------------------------------------\n");
+    wprintf(L"\n可用的音频程序列表：\n");
+    wprintf(L"----------------------------------------\n");
+    wprintf(L"PID\t程序路径\n");
+    wprintf(L"----------------------------------------\n");
     
     for (int i = 0; i < count; i++) {
-        printf("%u\t%ls\n", apps[i].pid, apps[i].name);
+        wprintf(L"%u\t%ls\n", apps[i].pid, apps[i].name);
     }
-    printf("----------------------------------------\n");
+    wprintf(L"----------------------------------------\n");
 }
 
 // 音频回调函数 - 使用static避免命名冲突
@@ -125,6 +159,8 @@ void whisper_processing_thread(struct whisper_context* ctx) {
     wparams.n_threads = g_params.threads;
     wparams.max_tokens = g_params.max_tokens;
     wparams.single_segment = true;
+    wparams.no_context = true;
+    wparams.duration_ms = g_params.length_ms;
 
     // 如果指定了翻译目标语言
     if (!g_params.translate_to.empty()) {
@@ -133,8 +169,16 @@ void whisper_processing_thread(struct whisper_context* ctx) {
     }
 
     std::vector<float> audio_data;
-    const int n_samples_30s = 30 * WHISPER_SAMPLE_RATE;
-    audio_data.reserve(n_samples_30s);
+    std::vector<float> processed_data;  // 用于重采样后的数据
+    const int n_samples_step = g_audio_buffer.sample_rate * g_params.step_ms / 1000;
+    const int n_samples_len = g_audio_buffer.sample_rate * g_params.length_ms / 1000;
+    audio_data.reserve(n_samples_len);
+
+    // 添加调试信息
+    wprintf(L"音频配置:\n");
+    wprintf(L"采样率: %d Hz\n", g_audio_buffer.sample_rate);
+    wprintf(L"步长样本数: %d\n", n_samples_step);
+    wprintf(L"长度样本数: %d\n", n_samples_len);
 
     while (g_is_running) {
         {
@@ -147,33 +191,85 @@ void whisper_processing_thread(struct whisper_context* ctx) {
         }
 
         // 当累积足够的音频数据时进行处理
-        if (audio_data.size() >= WHISPER_SAMPLE_RATE * (g_params.step_ms / 1000)) {
-            if (whisper_full(ctx, wparams, audio_data.data(), audio_data.size()) != 0) {
-                fprintf(stderr, "Failed to process audio\n");
+        if (audio_data.size() >= n_samples_len) {
+            // 检查音频数据是否有效
+            bool is_valid = false;
+            float max_abs = 0.0f;
+            for (float sample : audio_data) {
+                max_abs = std::max(max_abs, std::abs(sample));
+                if (max_abs > 0.01f) {  // 检查是否有有效的音频信号
+                    is_valid = true;
+                    break;
+                }
+            }
+
+            if (!is_valid) {
+                wprintf(L"跳过静音音频段\n");
+                audio_data.clear();
+                audio_data.reserve(n_samples_len);
+                continue;
+            }
+
+            // 重采样到16kHz
+            processed_data.resize(audio_data.size() * WHISPER_SAMPLE_RATE / g_audio_buffer.sample_rate);
+            for (size_t i = 0; i < processed_data.size(); i++) {
+                float src_idx = i * g_audio_buffer.sample_rate / (float)WHISPER_SAMPLE_RATE;
+                size_t src_idx_floor = (size_t)src_idx;
+                float t = src_idx - src_idx_floor;
+                
+                if (src_idx_floor >= audio_data.size() - 1) {
+                    processed_data[i] = audio_data.back();
+                } else {
+                    processed_data[i] = audio_data[src_idx_floor] * (1 - t) + 
+                                      audio_data[src_idx_floor + 1] * t;
+                }
+            }
+
+            // 处理音频
+            if (whisper_full(ctx, wparams, processed_data.data(), processed_data.size()) != 0) {
+                fwprintf(stderr, L"Failed to process audio (samples: %zu, max amplitude: %.3f)\n", 
+                    processed_data.size(), max_abs);
                 continue;
             }
 
             // 输出识别结果
             const int n_segments = whisper_full_n_segments(ctx);
-            for (int i = 0; i < n_segments; ++i) {
-                const char* text = whisper_full_get_segment_text(ctx, i);
-                if (g_params.no_timestamps) {
-                    printf("%s", text);
-                } else {
-                    const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
-                    const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
-                    printf("[%d:%02d.%03d -> %d:%02d.%03d] %s\n",
-                        (int)(t0 / 60000), (int)((t0 / 1000) % 60), (int)(t0 % 1000),
-                        (int)(t1 / 60000), (int)((t1 / 1000) % 60), (int)(t1 % 1000),
-                        text);
-                }
-                fflush(stdout);
-            }
-            printf("\n");
+            if (n_segments > 0) {
+                for (int i = 0; i < n_segments; ++i) {
+                    const char* text = whisper_full_get_segment_text(ctx, i);
+                    if (text == nullptr || strlen(text) == 0) {
+                        continue;
+                    }
+                    
+                    // 将UTF-8文本转换为宽字符
+                    int len = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
+                    std::vector<wchar_t> wtext(len);
+                    MultiByteToWideChar(CP_UTF8, 0, text, -1, wtext.data(), len);
 
-            // 清空处理过的音频数据
-            audio_data.clear();
-            audio_data.reserve(n_samples_30s);
+                    if (g_params.no_timestamps) {
+                        wprintf(L"%ls", wtext.data());
+                    } else {
+                        const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
+                        const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+                        wprintf(L"[%d:%02d.%03d -> %d:%02d.%03d] %ls\n",
+                            (int)(t0 / 60000), (int)((t0 / 1000) % 60), (int)(t0 % 1000),
+                            (int)(t1 / 60000), (int)((t1 / 1000) % 60), (int)(t1 % 1000),
+                            wtext.data());
+                    }
+                    fflush(stdout);
+                }
+                wprintf(L"\n");
+            }
+
+            // 保留最后一部分音频用于下一次处理
+            const int n_samples_keep = n_samples_len - n_samples_step;
+            if (n_samples_keep > 0 && audio_data.size() > n_samples_keep) {
+                std::vector<float> new_audio(audio_data.end() - n_samples_keep, audio_data.end());
+                audio_data = std::move(new_audio);
+            } else {
+                audio_data.clear();
+            }
+            audio_data.reserve(n_samples_len);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -181,6 +277,9 @@ void whisper_processing_thread(struct whisper_context* ctx) {
 }
 
 int main(int argc, char** argv) {
+    // 设置控制台UTF-8支持
+    set_console_utf8();
+
     bool list_mode = false;
     unsigned int target_pid = 0;
     const char* model_path = nullptr;
@@ -262,6 +361,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // 获取音频格式
+    AudioFormat format;
+    if (!wasapi_capture_get_format(capture, &format)) {
+        fprintf(stderr, "Failed to get audio format\n");
+        wasapi_capture_destroy(capture);
+        return 1;
+    }
+    g_audio_buffer.sample_rate = format.sample_rate;
+
     if (!wasapi_capture_initialize(capture)) {
         fprintf(stderr, "Failed to initialize audio capture\n");
         wasapi_capture_destroy(capture);
@@ -294,19 +402,21 @@ int main(int argc, char** argv) {
     }
 
     // 打印当前设置
-    printf("\n当前设置:\n");
-    printf("----------------------------------------\n");
-    printf("输入语言: %s\n", LANGUAGE_CODES.at(g_params.language).c_str());
+    wprintf(L"\n当前设置:\n");
+    wprintf(L"----------------------------------------\n");
+    wprintf(L"输入语言: %hs\n", LANGUAGE_CODES.at(g_params.language).c_str());
     if (g_params.translate) {
-        printf("翻译: 开启\n");
+        wprintf(L"翻译: 开启\n");
         if (!g_params.translate_to.empty()) {
-            printf("翻译目标语言: %s\n", LANGUAGE_CODES.at(g_params.translate_to).c_str());
+            wprintf(L"翻译目标语言: %hs\n", LANGUAGE_CODES.at(g_params.translate_to).c_str());
         }
     }
-    printf("线程数: %d\n", g_params.threads);
-    printf("GPU加速: %s\n", g_params.use_gpu ? "开启" : "关闭");
-    printf("时间戳: %s\n", g_params.no_timestamps ? "关闭" : "开启");
-    printf("----------------------------------------\n\n");
+    wprintf(L"线程数: %d\n", g_params.threads);
+    wprintf(L"GPU加速: %ls\n", g_params.use_gpu ? L"开启" : L"关闭");
+    wprintf(L"时间戳: %ls\n", g_params.no_timestamps ? L"关闭" : L"开启");
+    wprintf(L"音频步长: %d ms\n", g_params.step_ms);
+    wprintf(L"音频长度: %d ms\n", g_params.length_ms);
+    wprintf(L"----------------------------------------\n\n");
 
     // 设置音频回调
     wasapi_capture_set_callback(capture, (audio_callback)audio_data_callback, &g_audio_buffer);
@@ -317,15 +427,15 @@ int main(int argc, char** argv) {
     // 启动音频捕获
     bool capture_success;
     if (target_pid > 0) {
-        printf("正在捕获PID %u 的音频...\n", target_pid);
+        wprintf(L"正在捕获PID %u 的音频...\n", target_pid);
         capture_success = wasapi_capture_start_process(capture, target_pid);
     } else {
-        printf("正在捕获系统音频...\n");
+        wprintf(L"正在捕获系统音频...\n");
         capture_success = wasapi_capture_start(capture);
     }
 
     if (!capture_success) {
-        fprintf(stderr, "Failed to start audio capture\n");
+        fwprintf(stderr, L"Failed to start audio capture\n");
         g_is_running = false;
         whisper_thread.join();
         wasapi_capture_destroy(capture);
@@ -333,7 +443,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("Started capturing. Press Enter to stop...\n");
+    wprintf(L"Started capturing. Press Enter to stop...\n");
     getchar();
 
     // 清理资源

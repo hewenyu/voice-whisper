@@ -230,10 +230,10 @@ public:
             if (FAILED(hr)) return false;
         }
 
-        // 返回目标格式（16kHz，单声道，16位）
-        format->sample_rate = 16000;
-        format->channels = 1;
-        format->bits_per_sample = 16;
+        // 返回单声道格式，但保持原始采样率
+        format->sample_rate = mix_format_->nSamplesPerSec;
+        format->channels = 1;  // 单声道
+        format->bits_per_sample = mix_format_->wBitsPerSample;
 
         return true;
     }
@@ -246,119 +246,105 @@ private:
 
     DWORD capture_proc() {
         stop_capture_ = false;
-        float* resample_buffer = nullptr;
-        size_t resample_buffer_size = 0;
+        const UINT32 buffer_frame_count = mix_format_->nSamplesPerSec / 100; // 10ms buffer
+        std::vector<float> buffer(buffer_frame_count);  // 单声道缓冲区
 
         while (!stop_capture_) {
-            UINT32 packet_length = 0;
-            HRESULT hr = capture_client_->GetNextPacketSize(&packet_length);
+            UINT32 next_packet_size = 0;
+            HRESULT hr = capture_client_->GetNextPacketSize(&next_packet_size);
             if (FAILED(hr)) break;
 
-            if (packet_length == 0) {
-                Sleep(10);
-                continue;
-            }
+            while (next_packet_size > 0) {
+                BYTE* data = nullptr;
+                UINT32 frames_available = 0;
+                DWORD flags = 0;
 
-            BYTE* data;
-            UINT32 frames;
-            DWORD flags;
+                hr = capture_client_->GetBuffer(&data,
+                    &frames_available,
+                    &flags,
+                    nullptr,
+                    nullptr);
 
-            hr = capture_client_->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
-            if (FAILED(hr)) break;
+                if (FAILED(hr)) break;
 
-            if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT) && callback_) {
-                float* audio_data = (float*)data;
-                int channels = mix_format_->nChannels;
-                int original_sample_rate = mix_format_->nSamplesPerSec;
-                
-                // 计算重采样后的帧数
-                int resampled_frames = (int)((float)frames * 16000 / original_sample_rate);
-                
-                // 确保重采样缓冲区足够大
-                if (resample_buffer_size < resampled_frames) {
-                    delete[] resample_buffer;
-                    resample_buffer_size = resampled_frames;
-                    resample_buffer = new float[resample_buffer_size];
-                }
+                if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
+                    const float* float_data = reinterpret_cast<const float*>(data);
+                    const int channels = mix_format_->nChannels;
 
-                // 首先转换为单声道
-                float* mono_data = new float[frames];
-                for (UINT32 i = 0; i < frames; i++) {
-                    float sum = 0;
-                    for (int ch = 0; ch < channels; ch++) {
-                        sum += audio_data[i * channels + ch];
+                    // 转换为单声道
+                    for (UINT32 i = 0; i < frames_available; i++) {
+                        float sum = 0.0f;
+                        for (int ch = 0; ch < channels; ch++) {
+                            sum += float_data[i * channels + ch];
+                        }
+                        buffer[i] = sum / channels;  // 平均值作为单声道数据
                     }
-                    mono_data[i] = sum / channels;
-                }
 
-                // 线性插值重采样到16kHz
-                for (int i = 0; i < resampled_frames; i++) {
-                    float position = (float)i * original_sample_rate / 16000;
-                    int index = (int)position;
-                    float fraction = position - index;
-
-                    if (index >= frames - 1) {
-                        resample_buffer[i] = mono_data[frames - 1];
-                    } else {
-                        resample_buffer[i] = mono_data[index] * (1 - fraction) + 
-                                           mono_data[index + 1] * fraction;
+                    if (callback_) {
+                        callback_(user_data_, buffer.data(), frames_available);
                     }
                 }
 
-                // 调用回调函数
-                callback_(user_data_, resample_buffer, resampled_frames);
-                
-                delete[] mono_data;
+                hr = capture_client_->ReleaseBuffer(frames_available);
+                if (FAILED(hr)) break;
+
+                hr = capture_client_->GetNextPacketSize(&next_packet_size);
+                if (FAILED(hr)) break;
             }
 
-            hr = capture_client_->ReleaseBuffer(frames);
-            if (FAILED(hr)) break;
+            Sleep(1); // 避免CPU占用过高
         }
 
-        delete[] resample_buffer;
         return 0;
     }
 
     void cleanup() {
         stop();
-        if (capture_client_) {
-            capture_client_->Release();
-            capture_client_ = nullptr;
-        }
-        if (audio_client_) {
-            audio_client_->Release();
-            audio_client_ = nullptr;
-        }
-        if (audio_device_) {
-            audio_device_->Release();
-            audio_device_ = nullptr;
-        }
-        if (device_enumerator_) {
-            device_enumerator_->Release();
-            device_enumerator_ = nullptr;
-        }
-        if (session_manager_) {
-            session_manager_->Release();
-            session_manager_ = nullptr;
-        }
+        
         if (mix_format_) {
             CoTaskMemFree(mix_format_);
             mix_format_ = nullptr;
         }
-        is_initialized_ = false;
+        
+        if (capture_client_) {
+            capture_client_->Release();
+            capture_client_ = nullptr;
+        }
+        
+        if (audio_client_) {
+            audio_client_->Release();
+            audio_client_ = nullptr;
+        }
+        
+        if (session_manager_) {
+            session_manager_->Release();
+            session_manager_ = nullptr;
+        }
+        
+        if (audio_device_) {
+            audio_device_->Release();
+            audio_device_ = nullptr;
+        }
+        
+        if (device_enumerator_) {
+            device_enumerator_->Release();
+            device_enumerator_ = nullptr;
+        }
     }
 
     IMMDeviceEnumerator* device_enumerator_;
     IMMDevice* audio_device_;
     IAudioClient* audio_client_;
     IAudioCaptureClient* capture_client_;
+    IAudioSessionManager2* session_manager_;
+    WAVEFORMATEX* mix_format_;
+    
     bool is_initialized_;
     bool stop_capture_;
     HANDLE capture_thread_;
+    
     audio_callback callback_;
     void* user_data_;
-    IAudioSessionManager2* session_manager_;
-    WAVEFORMATEX* mix_format_;
 };
 
 // C接口实现

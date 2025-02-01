@@ -65,17 +65,34 @@ public:
     }
 
     bool start() {
-        if (!is_initialized_) return false;
+        if (!is_initialized_) {
+            std::cerr << "Cannot start: not initialized" << std::endl;
+            return false;
+        }
+        
+        std::cout << "Starting audio client..." << std::endl;
         HRESULT hr = audio_client_->Start();
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) {
+            std::cerr << "Failed to start audio client: 0x" << std::hex << hr << std::endl;
+            return false;
+        }
 
+        std::cout << "Creating capture thread..." << std::endl;
+        stop_capture_ = false;
         // 创建捕获线程
         capture_thread_ = CreateThread(
             nullptr, 0,
             capture_thread_proc,
             this, 0, nullptr
         );
-        return capture_thread_ != nullptr;
+        
+        if (!capture_thread_) {
+            std::cerr << "Failed to create capture thread" << std::endl;
+            return false;
+        }
+        
+        std::cout << "Capture thread created successfully" << std::endl;
+        return true;
     }
 
     void stop() {
@@ -234,93 +251,48 @@ public:
 private:
     static DWORD WINAPI capture_thread_proc(LPVOID param) {
         auto* capture = static_cast<WasapiCapture*>(param);
-        return capture->capture_proc();
-    }
-
-    DWORD capture_proc() {
-        stop_capture_ = false;
-        float* resample_buffer = nullptr;
-        size_t resample_buffer_size = 0;
-
-        while (!stop_capture_) {
-            UINT32 packet_length = 0;
-            HRESULT hr = capture_client_->GetNextPacketSize(&packet_length);
-            if (FAILED(hr)) break;
-
-            if (packet_length == 0) {
-                Sleep(1);
-                continue;
-            }
-
+        std::cout << "Capture thread started" << std::endl;
+        
+        // 分配缓冲区
+        std::vector<float> buffer(4096);
+        
+        while (!capture->stop_capture_) {
             BYTE* data;
             UINT32 frames;
             DWORD flags;
-
-            hr = capture_client_->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
-            if (FAILED(hr)) break;
-
-            if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT) && callback_) {
-                float* audio_data = (float*)data;
-                int channels = mix_format_->nChannels;
-                int original_sample_rate = mix_format_->nSamplesPerSec;
-                
-                // 计算重采样后的帧数
-                int resampled_frames = (int)((float)frames * 16000 / original_sample_rate);
-                
-                // 确保重采样缓冲区足够大
-                if (resample_buffer_size < resampled_frames) {
-                    delete[] resample_buffer;
-                    resample_buffer_size = resampled_frames;
-                    resample_buffer = new float[resample_buffer_size];
+            UINT64 position;
+            UINT64 qpc;
+            
+            HRESULT hr = capture->capture_client_->GetBuffer(
+                &data, &frames, &flags, &position, &qpc
+            );
+            
+            if (FAILED(hr)) {
+                if (hr != AUDCLNT_S_BUFFER_EMPTY) {
+                    std::cerr << "Failed to get buffer: 0x" << std::hex << hr << std::endl;
+                    break;
                 }
-
-                // 首先转换为单声道，并进行音量标准化
-                float* mono_data = new float[frames];
-                float max_amplitude = 0.0f;
-                
-                // 计算最大振幅
-                for (UINT32 i = 0; i < frames; i++) {
-                    float sum = 0;
-                    for (int ch = 0; ch < channels; ch++) {
-                        sum += audio_data[i * channels + ch];
-                    }
-                    mono_data[i] = sum / channels;
-                    max_amplitude = std::max(max_amplitude, std::abs(mono_data[i]));
-                }
-
-                // 如果音量太小，进行放大
-                if (max_amplitude > 0 && max_amplitude < 0.1f) {
-                    float gain = 0.1f / max_amplitude;
-                    for (UINT32 i = 0; i < frames; i++) {
-                        mono_data[i] *= gain;
-                    }
-                }
-
-                // 线性插值重采样到16kHz
-                for (int i = 0; i < resampled_frames; i++) {
-                    float position = (float)i * original_sample_rate / 16000;
-                    int index = (int)position;
-                    float fraction = position - index;
-
-                    if (index >= frames - 1) {
-                        resample_buffer[i] = mono_data[frames - 1];
-                    } else {
-                        resample_buffer[i] = mono_data[index] * (1 - fraction) + 
-                                           mono_data[index + 1] * fraction;
-                    }
-                }
-
-                // 调用回调函数
-                callback_(user_data_, resample_buffer, resampled_frames);
-                
-                delete[] mono_data;
+                Sleep(10);
+                continue;
             }
-
-            hr = capture_client_->ReleaseBuffer(frames);
-            if (FAILED(hr)) break;
+            
+            if (frames > 0) {
+                std::cout << "Captured " << frames << " frames" << std::endl;
+                if (capture->callback_) {
+                    capture->callback_(capture->user_data_, 
+                        reinterpret_cast<float*>(data), 
+                        static_cast<int>(frames));
+                }
+            }
+            
+            hr = capture->capture_client_->ReleaseBuffer(frames);
+            if (FAILED(hr)) {
+                std::cerr << "Failed to release buffer: 0x" << std::hex << hr << std::endl;
+                break;
+            }
         }
-
-        delete[] resample_buffer;
+        
+        std::cout << "Capture thread stopped" << std::endl;
         return 0;
     }
 

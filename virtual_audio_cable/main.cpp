@@ -388,6 +388,7 @@ private:
     }
 
     bool register_endpoint() {
+        std::cout << "Creating policy config instance..." << std::endl;
         HRESULT hr = CoCreateInstance(
             CLSID_CPolicyConfigClient,
             nullptr,
@@ -398,28 +399,73 @@ private:
 
         if (FAILED(hr)) {
             std::cerr << "Failed to create policy config: " << GetErrorMessage(hr) << std::endl;
+            std::cerr << "Error code: 0x" << std::hex << hr << std::dec << std::endl;
+            std::cerr << "This may be due to insufficient privileges. Please run as administrator." << std::endl;
             return false;
         }
 
         // 创建唯一的设备ID
+        std::cout << "Creating virtual device ID..." << std::endl;
         wchar_t guid_str[39];
         StringFromGUID2(VIRTUAL_AUDIO_GUID, guid_str, 39);
         device_id_ = L"SWD\\MMDEVAPI\\";
         device_id_ += guid_str;
 
+        std::wcout << L"Registering virtual device with ID: " << device_id_ << std::endl;
+        
         // 注册虚拟设备
+        std::cout << "Calling RegisterAudioEndpoint..." << std::endl;
+        GUID moduleId = VIRTUAL_AUDIO_GUID;  // 创建一个非const副本
         hr = policy_config_->RegisterAudioEndpoint(
             device_id_.c_str(),
             L"Virtual Audio Device",
             L"Virtual",
-            eCapture,
+            eRender,  // 改为eRender，因为我们要创建一个播放设备
             DEVICE_STATE_ACTIVE,
-            nullptr
+            &moduleId
         );
 
         if (FAILED(hr)) {
             std::cerr << "Failed to register audio endpoint: " << GetErrorMessage(hr) << std::endl;
+            std::cerr << "Error code: 0x" << std::hex << hr << std::dec << std::endl;
+            
+            // 检查常见错误
+            if (hr == E_ACCESSDENIED) {
+                std::cerr << "Access denied. Please ensure you are running as administrator." << std::endl;
+            }
+            else if (hr == REGDB_E_CLASSNOTREG) {
+                std::cerr << "Class not registered. The PolicyConfig interface may not be available on this system." << std::endl;
+            }
+            else if (hr == E_INVALIDARG) {
+                std::cerr << "Invalid argument passed to RegisterAudioEndpoint." << std::endl;
+            }
+            
             return false;
+        }
+
+        std::cout << "Virtual audio endpoint registered successfully" << std::endl;
+        
+        // 验证设备是否真的被创建
+        std::cout << "Verifying device creation..." << std::endl;
+        IMMDeviceEnumerator* enumerator = nullptr;
+        hr = CoCreateInstance(
+            __uuidof(MMDeviceEnumerator), nullptr,
+            CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+            (void**)&enumerator
+        );
+        
+        if (SUCCEEDED(hr)) {
+            IMMDevice* device = nullptr;
+            hr = enumerator->GetDevice(device_id_.c_str(), &device);
+            
+            if (SUCCEEDED(hr)) {
+                std::cout << "Device verification successful" << std::endl;
+                device->Release();
+            } else {
+                std::cerr << "Device verification failed: " << GetErrorMessage(hr) << std::endl;
+            }
+            
+            enumerator->Release();
         }
 
         return true;
@@ -456,25 +502,34 @@ public:
     }
 
     bool initialize(DWORD target_pid = 0) {
+        std::cout << "Starting device initialization..." << std::endl;
+        
         // 注册虚拟设备端点
         if (!register_endpoint()) {
             std::cerr << "Failed to register virtual audio device" << std::endl;
             return false;
         }
 
+        std::cout << "Initializing WASAPI capture..." << std::endl;
         // 初始化WASAPI捕获
         if (!wasapi_capture_initialize(wasapi_capture_)) {
             std::cerr << "Failed to initialize WASAPI capture" << std::endl;
             return false;
         }
 
+        std::cout << "Setting up audio callback..." << std::endl;
         // 设置音频回调
         wasapi_capture_set_callback(wasapi_capture_, audio_callback, this);
 
+        std::cout << "Creating audio event..." << std::endl;
         // 创建事件
         audio_event_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-        if (!audio_event_) return false;
+        if (!audio_event_) {
+            std::cerr << "Failed to create audio event" << std::endl;
+            return false;
+        }
 
+        std::cout << "Setting up audio client..." << std::endl;
         // 设置音频客户端
         if (!setup_audio_client()) {
             std::cerr << "Failed to setup audio client" << std::endl;
@@ -483,6 +538,7 @@ public:
 
         // 保存目标PID，在start时使用
         target_process_id_ = target_pid;
+        std::cout << "Initialization completed successfully" << std::endl;
 
         return true;
     }
@@ -567,24 +623,28 @@ void print_usage() {
 
 int main(int argc, char* argv[]) {
     // 初始化COM
+    std::cout << "Initializing COM..." << std::endl;
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
-        std::cerr << "Failed to initialize COM" << std::endl;
+        std::cerr << "Failed to initialize COM: " << GetErrorMessage(hr) << std::endl;
         return 1;
     }
 
+    std::cout << "Creating virtual audio device..." << std::endl;
     VirtualAudioDevice device;
 
     // 解析命令行参数
     if (argc > 1) {
         std::string arg = argv[1];
         if (arg == "--list") {
+            std::cout << "Listing audio applications..." << std::endl;
             bool result = device.list_apps();
             CoUninitialize();
             return result ? 0 : 1;
         }
         else if (arg == "-p" && argc > 2) {
             DWORD pid = static_cast<DWORD>(std::stoul(argv[2]));
+            std::cout << "Initializing virtual audio device for PID " << pid << "..." << std::endl;
             if (!device.initialize(pid)) {
                 std::cerr << "Failed to initialize virtual audio device for PID " << pid << std::endl;
                 CoUninitialize();
@@ -598,6 +658,7 @@ int main(int argc, char* argv[]) {
         }
     }
     else {
+        std::cout << "Initializing virtual audio device..." << std::endl;
         if (!device.initialize()) {
             std::cerr << "Failed to initialize virtual audio device" << std::endl;
             CoUninitialize();
@@ -605,6 +666,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    std::cout << "Starting virtual audio device..." << std::endl;
     if (!device.start()) {
         std::cerr << "Failed to start virtual audio device" << std::endl;
         CoUninitialize();
@@ -614,7 +676,10 @@ int main(int argc, char* argv[]) {
     std::cout << "Virtual audio device is running. Press Enter to stop..." << std::endl;
     std::cin.get();
 
+    std::cout << "Stopping virtual audio device..." << std::endl;
     device.stop();
+    
+    std::cout << "Cleaning up..." << std::endl;
     CoUninitialize();
     return 0;
 }

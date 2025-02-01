@@ -255,7 +255,7 @@ private:
             if (FAILED(hr)) break;
 
             if (packet_length == 0) {
-                Sleep(10);
+                Sleep(1);
                 continue;
             }
 
@@ -281,14 +281,26 @@ private:
                     resample_buffer = new float[resample_buffer_size];
                 }
 
-                // 首先转换为单声道
+                // 首先转换为单声道，并进行音量标准化
                 float* mono_data = new float[frames];
+                float max_amplitude = 0.0f;
+                
+                // 计算最大振幅
                 for (UINT32 i = 0; i < frames; i++) {
                     float sum = 0;
                     for (int ch = 0; ch < channels; ch++) {
                         sum += audio_data[i * channels + ch];
                     }
                     mono_data[i] = sum / channels;
+                    max_amplitude = std::max(max_amplitude, std::abs(mono_data[i]));
+                }
+
+                // 如果音量太小，进行放大
+                if (max_amplitude > 0 && max_amplitude < 0.1f) {
+                    float gain = 0.1f / max_amplitude;
+                    for (UINT32 i = 0; i < frames; i++) {
+                        mono_data[i] *= gain;
+                    }
                 }
 
                 // 线性插值重采样到16kHz

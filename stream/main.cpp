@@ -9,6 +9,7 @@
 #include <queue>
 #include <map>
 #include <windows.h>
+#include <cmath>
 
 // 音频缓冲队列
 struct AudioBuffer {
@@ -19,17 +20,25 @@ struct AudioBuffer {
 
 // whisper参数结构体
 struct WhisperParams {
-    std::string language = "zh";      // 输入语言
-    std::string translate_to = "";    // 翻译目标语言
-    bool translate = false;           // 是否翻译
-    bool no_timestamps = true;        // 是否显示时间戳
-    int threads = 4;                  // 线程数
-    int max_tokens = 32;             // 最大token数
-    bool use_gpu = true;             // 是否使用GPU
-    float vad_thold = 0.6f;          // VAD阈值
-    bool print_special = false;       // 是否打印特殊标记
-    int step_ms = 3000;              // 音频步长(ms)
-    int length_ms = 10000;           // 音频长度(ms)
+    int32_t n_threads = std::min(4, (int32_t)std::thread::hardware_concurrency());
+    int32_t step_ms = 3000;      // 音频步长(ms)
+    int32_t length_ms = 10000;   // 音频长度(ms)
+    int32_t keep_ms = 200;       // 保留音频长度(ms)
+    int32_t max_tokens = 32;     // 最大token数
+    int32_t audio_ctx = 0;       // 音频上下文大小
+
+    float vad_thold = 0.6f;      // VAD阈值
+    float freq_thold = 100.0f;   // 频率阈值
+
+    bool translate = false;       // 是否翻译
+    bool no_fallback = false;    // 是否禁用温度回退
+    bool print_special = false;  // 是否打印特殊标记
+    bool no_context = true;      // 是否保持上下文
+    bool no_timestamps = false;  // 是否显示时间戳
+    bool use_gpu = true;        // 是否使用GPU
+
+    std::string language = "en"; // 输入语言
+    std::string translate_to = ""; // 翻译目标语言
 };
 
 // 语言代码映射
@@ -102,7 +111,7 @@ void list_audio_applications(void* capture) {
     printf("----------------------------------------\n");
 }
 
-// 音频回调函数 - 使用static避免命名冲突
+// 音频回调函数
 static void audio_data_callback(void* user_data, float* buffer, int frames) {
     auto& audio_buffer = *static_cast<AudioBuffer*>(user_data);
     std::vector<float> frame_data(buffer, buffer + frames);
@@ -123,9 +132,16 @@ void whisper_processing_thread(struct whisper_context* ctx) {
     wparams.print_timestamps = !g_params.no_timestamps;
     wparams.translate = g_params.translate;
     wparams.language = g_params.language.c_str();
-    wparams.n_threads = g_params.threads;
+    wparams.n_threads = g_params.n_threads;
+    wparams.audio_ctx = g_params.audio_ctx;
     wparams.max_tokens = g_params.max_tokens;
     wparams.single_segment = true;
+    wparams.no_context = true;    // 禁用上下文
+    wparams.no_timestamps = false; // 启用时间戳
+
+    // VAD 参数
+    const float vad_thold = g_params.vad_thold;
+    const float freq_thold = g_params.freq_thold;
 
     // 如果指定了翻译目标语言
     if (!g_params.translate_to.empty()) {
@@ -133,23 +149,95 @@ void whisper_processing_thread(struct whisper_context* ctx) {
         wparams.language = g_params.translate_to.c_str();
     }
 
-    std::vector<float> audio_data;
+    std::vector<float> pcmf32;
+    std::vector<float> pcmf32_old;
+    std::vector<float> pcmf32_new;
     const int n_samples_30s = 30 * WHISPER_SAMPLE_RATE;
-    audio_data.reserve(n_samples_30s);
+    const int n_samples_step = (1e-3 * g_params.step_ms) * WHISPER_SAMPLE_RATE;
+    const int n_samples_len = (1e-3 * g_params.length_ms) * WHISPER_SAMPLE_RATE;
+    const int n_samples_keep = (1e-3 * g_params.keep_ms) * WHISPER_SAMPLE_RATE;
+
+    pcmf32.reserve(n_samples_30s);
+    pcmf32_new.reserve(n_samples_30s);
+
+    printf("\n");
+    printf("processing %d samples (step = %.1f sec / len = %.1f sec / keep = %.1f sec), %d threads, lang = %s, task = %s, timestamps = %d ...\n",
+            n_samples_step,
+            float(n_samples_step)/WHISPER_SAMPLE_RATE,
+            float(n_samples_len)/WHISPER_SAMPLE_RATE,
+            float(n_samples_keep)/WHISPER_SAMPLE_RATE,
+            g_params.n_threads,
+            g_params.language.c_str(),
+            g_params.translate ? "translate" : "transcribe",
+            !g_params.no_timestamps);
+
+    printf("\n");
 
     while (g_is_running) {
+        // 从音频缓冲区获取数据
         {
             std::lock_guard<std::mutex> lock(g_audio_buffer.mtx);
             while (!g_audio_buffer.queue.empty()) {
                 auto& chunk = g_audio_buffer.queue.front();
-                audio_data.insert(audio_data.end(), chunk.begin(), chunk.end());
+                pcmf32_new.insert(pcmf32_new.end(), chunk.begin(), chunk.end());
                 g_audio_buffer.queue.pop();
             }
         }
 
-        // 当累积足够的音频数据时进行处理
-        if (audio_data.size() >= WHISPER_SAMPLE_RATE * (g_params.step_ms / 1000)) {
-            if (whisper_full(ctx, wparams, audio_data.data(), audio_data.size()) != 0) {
+        if (pcmf32_new.size() > 2 * n_samples_step) {
+            fprintf(stderr, "\n\nWARNING: cannot process audio fast enough, dropping audio...\n\n");
+            pcmf32_new.clear();
+            continue;
+        }
+
+        if (pcmf32_new.size() >= n_samples_step) {
+            // 处理新的音频数据
+            const int n_samples_new = pcmf32_new.size();
+            
+            // 从上一次迭代中保留部分音频
+            const int n_samples_take = std::min((int)pcmf32_old.size(), 
+                                              std::max(0, n_samples_keep + n_samples_len - n_samples_new));
+
+            pcmf32.resize(n_samples_new + n_samples_take);
+
+            // 复制保留的音频数据
+            for (int i = 0; i < n_samples_take; i++) {
+                pcmf32[i] = pcmf32_old[pcmf32_old.size() - n_samples_take + i];
+            }
+
+            // 复制新的音频数据
+            memcpy(pcmf32.data() + n_samples_take, pcmf32_new.data(), n_samples_new * sizeof(float));
+
+            // 保存当前音频数据供下次使用
+            pcmf32_old = pcmf32;
+            pcmf32_new.clear();
+
+            // 检查是否有语音活动
+            bool vad_enabled = true;  // 启用VAD
+            if (vad_enabled) {
+                bool speech_detected = false;
+                const int n_samples_per_ms = WHISPER_SAMPLE_RATE / 1000;
+                const int n_samples_window = 100 * n_samples_per_ms; // 100ms窗口
+
+                for (int i = 0; i < (int)pcmf32.size() - n_samples_window; i += n_samples_window) {
+                    float sum = 0.0f;
+                    for (int j = 0; j < n_samples_window; j++) {
+                        sum += fabs(pcmf32[i + j]);
+                    }
+                    float avg = sum / n_samples_window;
+                    if (avg > vad_thold) {
+                        speech_detected = true;
+                        break;
+                    }
+                }
+
+                if (!speech_detected) {
+                    continue;
+                }
+            }
+
+            // 处理音频
+            if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
                 fprintf(stderr, "Failed to process audio\n");
                 continue;
             }
@@ -158,23 +246,21 @@ void whisper_processing_thread(struct whisper_context* ctx) {
             const int n_segments = whisper_full_n_segments(ctx);
             for (int i = 0; i < n_segments; ++i) {
                 const char* text = whisper_full_get_segment_text(ctx, i);
-                if (g_params.no_timestamps) {
-                    printf("%s", text);
-                } else {
-                    const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
-                    const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
-                    printf("[%d:%02d.%03d -> %d:%02d.%03d] %s\n",
-                        (int)(t0 / 60000), (int)((t0 / 1000) % 60), (int)(t0 % 1000),
-                        (int)(t1 / 60000), (int)((t1 / 1000) % 60), (int)(t1 % 1000),
-                        text);
-                }
-                fflush(stdout);
-            }
-            printf("\n");
+                const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
+                const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
 
-            // 清空处理过的音频数据
-            audio_data.clear();
-            audio_data.reserve(n_samples_30s);
+                if (strlen(text) > 0) {  // 只输出非空文本
+                    if (g_params.no_timestamps) {
+                        printf("%s", text);
+                    } else {
+                        printf("[%d:%02d.%03d -> %d:%02d.%03d] %s\n",
+                            (int)(t0 / 60000), (int)((t0 / 1000) % 60), (int)(t0 % 1000),
+                            (int)(t1 / 60000), (int)((t1 / 1000) % 60), (int)(t1 % 1000),
+                            text);
+                    }
+                    fflush(stdout);
+                }
+            }
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -184,9 +270,17 @@ void whisper_processing_thread(struct whisper_context* ctx) {
 int main(int argc, char** argv) {
     // 设置控制台代码页为UTF-8
     SetConsoleOutputCP(CP_UTF8);
-    // 启用控制台的 UTF-8 支持
     SetConsoleCP(CP_UTF8);
     
+    // 设置默认参数 - 移到参数解析之前
+    g_params.step_ms = 1000;     // 默认步长改为1000ms
+    g_params.length_ms = 3000;   // 默认长度改为3000ms
+    g_params.keep_ms = 200;      // 保持200ms
+    g_params.vad_thold = 0.1f;   // 降低VAD阈值
+    g_params.freq_thold = 50.0f; // 降低频率阈值
+    g_params.no_timestamps = false;  // 默认显示时间戳
+    g_params.language = "auto";     // 默认使用中文
+
     bool list_mode = false;
     unsigned int target_pid = 0;
     const char* model_path = nullptr;
@@ -210,7 +304,7 @@ int main(int argc, char** argv) {
             }
         }
         else if (arg == "-t" || arg == "--threads") {
-            if (i + 1 < argc) g_params.threads = std::stoi(argv[++i]);
+            if (i + 1 < argc) g_params.n_threads = std::stoi(argv[++i]);
         }
         else if (arg == "-mt" || arg == "--max-tokens") {
             if (i + 1 < argc) g_params.max_tokens = std::stoi(argv[++i]);
@@ -300,22 +394,27 @@ int main(int argc, char** argv) {
     }
 
     // 打印当前设置
-    wprintf(L"\n当前设置:\n");
-    wprintf(L"----------------------------------------\n");
-    wprintf(L"输入语言: %hs\n", LANGUAGE_CODES.at(g_params.language).c_str());
+    printf("\n当前设置:\n");
+    printf("----------------------------------------\n");
+    printf("音频步长: %d ms\n", g_params.step_ms);
+    printf("音频长度: %d ms\n", g_params.length_ms);
+    printf("保留长度: %d ms\n", g_params.keep_ms);
+    printf("VAD阈值: %.3f\n", g_params.vad_thold);
+    printf("频率阈值: %.1f Hz\n", g_params.freq_thold);
+    printf("输入语言: %s\n", LANGUAGE_CODES.at(g_params.language).c_str());
     if (g_params.translate) {
-        wprintf(L"翻译: 开启\n");
+        printf("翻译: 开启\n");
         if (!g_params.translate_to.empty()) {
-            wprintf(L"翻译目标语言: %hs\n", LANGUAGE_CODES.at(g_params.translate_to).c_str());
+            printf("翻译目标语言: %s\n", LANGUAGE_CODES.at(g_params.translate_to).c_str());
         }
     }
-    wprintf(L"线程数: %d\n", g_params.threads);
-    wprintf(L"GPU加速: %hs\n", g_params.use_gpu ? "开启" : "关闭");
-    wprintf(L"时间戳: %hs\n", g_params.no_timestamps ? "关闭" : "开启");
-    wprintf(L"----------------------------------------\n\n");
+    printf("线程数: %d\n", g_params.n_threads);
+    printf("GPU加速: %s\n", g_params.use_gpu ? "开启" : "关闭");
+    printf("时间戳: %s\n", g_params.no_timestamps ? "关闭" : "开启");
+    printf("----------------------------------------\n\n");
 
     // 设置音频回调
-    wasapi_capture_set_callback(capture, (audio_callback)audio_data_callback, &g_audio_buffer);
+    wasapi_capture_set_callback(capture, audio_data_callback, &g_audio_buffer);
 
     // 启动whisper处理线程
     std::thread whisper_thread(whisper_processing_thread, ctx);

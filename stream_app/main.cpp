@@ -187,6 +187,8 @@ bool whisper_params_parse(int argc, char ** argv, whisper_params & params) {
             exit(0);
         }
         else if (arg == "-t"   || arg == "--threads")     { params.n_threads     = std::stoi(argv[++i]); }
+        else if (                  arg == "--step")        { params.step_ms       = std::stoi(argv[++i]); }
+        else if (                  arg == "--length")      { params.length_ms     = std::stoi(argv[++i]); }
         else if (arg == "-c"   || arg == "--capture")     { params.capture_id    = std::stoi(argv[++i]); }
         else if (arg == "-mt"  || arg == "--max-tokens")  { params.max_tokens    = std::stoi(argv[++i]); }
         else if (arg == "-ac"  || arg == "--audio-ctx")   { params.audio_ctx     = std::stoi(argv[++i]); }
@@ -222,6 +224,8 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "options:\n");
     fprintf(stderr, "  -h,       --help          show this help message and exit\n");
     fprintf(stderr, "  -t N,     --threads N     number of threads to use during computation (default: %d)\n", params.n_threads);
+    fprintf(stderr, "            --step N        audio step size in milliseconds (default: %d)\n", params.step_ms);
+    fprintf(stderr, "            --length N      audio length in milliseconds (default: %d)\n", params.length_ms);
     fprintf(stderr, "  -c ID,    --capture ID    capture device ID (default: %d)\n", params.capture_id);
     fprintf(stderr, "  -mt N,    --max-tokens N  maximum number of tokens per audio chunk (default: %d)\n", params.max_tokens);
     fprintf(stderr, "  -ac N,    --audio-ctx N   audio context size (0 - all) (default: %d)\n", params.audio_ctx);

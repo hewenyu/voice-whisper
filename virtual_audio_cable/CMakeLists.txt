@@ -8,12 +8,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 设置虚拟音频设备项目
 add_executable(virtual_audio_cable
     main.cpp
+    policy_config.h
 )
 
 # 设置包含目录
 target_include_directories(virtual_audio_cable PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../audio_capture/windows
-    ${CMAKE_CURRENT_SOURCE_DIR}/../dep/whisper.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 # 设置编译选项
@@ -24,12 +25,22 @@ if(MSVC)
         /EHsc
         /D_WIN32_WINNT=0x0601  # Windows 7 or later
     )
+    target_compile_definitions(virtual_audio_cable PRIVATE
+        INITGUID
+        UNICODE
+        _UNICODE
+    )
 else()
     target_compile_options(virtual_audio_cable PRIVATE 
         -O3 
         -Wall 
         -Wextra
         -D_WIN32_WINNT=0x0601  # Windows 7 or later
+    )
+    target_compile_definitions(virtual_audio_cable PRIVATE
+        INITGUID
+        UNICODE
+        _UNICODE
     )
 endif()
 
@@ -41,6 +52,7 @@ target_link_libraries(virtual_audio_cable PRIVATE
     avrt
     winmm
     uuid
+    setupapi
 )
 
 # 设置输出目录

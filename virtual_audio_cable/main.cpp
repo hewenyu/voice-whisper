@@ -3,6 +3,9 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
+#include <Audioclient.h>
+#include <mmdeviceapi.h>
+#include <endpointvolume.h>
 #include <avrt.h>
 #include <thread>
 #include <atomic>
@@ -13,7 +16,12 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <Functiondiscoverykeys_devpkey.h>
+#include "policy_config.h"
 #include "../audio_capture/windows/wasapi_capture.h"
+
+// 只定义虚拟设备GUID
+DEFINE_GUID(VIRTUAL_AUDIO_GUID, 0x12345678, 0x1234, 0x1234, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34);
 
 // 定义常量
 const REFERENCE_TIME REFTIMES_PER_SEC = 10000000;
@@ -64,6 +72,8 @@ private:
     void* wasapi_capture_;
     WAVEFORMATEX wave_format_;
     DWORD target_process_id_;
+    IPolicyConfig* policy_config_;
+    std::wstring device_id_;
 
     static void CALLBACK audio_callback(void* user_data, float* data, int frame_count) {
         auto* device = static_cast<VirtualAudioDevice*>(user_data);
@@ -377,10 +387,60 @@ private:
         return true;
     }
 
+    bool register_endpoint() {
+        HRESULT hr = CoCreateInstance(
+            CLSID_CPolicyConfigClient,
+            nullptr,
+            CLSCTX_ALL,
+            IID_IPolicyConfig,
+            (void**)&policy_config_
+        );
+
+        if (FAILED(hr)) {
+            std::cerr << "Failed to create policy config: " << GetErrorMessage(hr) << std::endl;
+            return false;
+        }
+
+        // 创建唯一的设备ID
+        wchar_t guid_str[39];
+        StringFromGUID2(VIRTUAL_AUDIO_GUID, guid_str, 39);
+        device_id_ = L"SWD\\MMDEVAPI\\";
+        device_id_ += guid_str;
+
+        // 注册虚拟设备
+        hr = policy_config_->RegisterAudioEndpoint(
+            device_id_.c_str(),
+            L"Virtual Audio Device",
+            L"Virtual",
+            eCapture,
+            DEVICE_STATE_ACTIVE,
+            nullptr
+        );
+
+        if (FAILED(hr)) {
+            std::cerr << "Failed to register audio endpoint: " << GetErrorMessage(hr) << std::endl;
+            return false;
+        }
+
+        return true;
+    }
+
+    bool unregister_endpoint() {
+        if (policy_config_ && !device_id_.empty()) {
+            HRESULT hr = policy_config_->UnregisterAudioEndpoint(device_id_.c_str());
+            if (FAILED(hr)) {
+                std::cerr << "Failed to unregister audio endpoint: " << GetErrorMessage(hr) << std::endl;
+                return false;
+            }
+        }
+        return true;
+    }
+
 public:
     VirtualAudioDevice() : running_(false), audio_client_(nullptr), capture_client_(nullptr),
                           render_client_(nullptr), audio_event_(nullptr), 
-                          render_thread_handle_(nullptr), task_index_(0), target_process_id_(0) {
+                          render_thread_handle_(nullptr), task_index_(0), target_process_id_(0),
+                          policy_config_(nullptr) {
         wasapi_capture_ = wasapi_capture_create();
     }
 
@@ -389,9 +449,19 @@ public:
         if (wasapi_capture_) {
             wasapi_capture_destroy(wasapi_capture_);
         }
+        if (policy_config_) {
+            unregister_endpoint();
+            policy_config_->Release();
+        }
     }
 
     bool initialize(DWORD target_pid = 0) {
+        // 注册虚拟设备端点
+        if (!register_endpoint()) {
+            std::cerr << "Failed to register virtual audio device" << std::endl;
+            return false;
+        }
+
         // 初始化WASAPI捕获
         if (!wasapi_capture_initialize(wasapi_capture_)) {
             std::cerr << "Failed to initialize WASAPI capture" << std::endl;

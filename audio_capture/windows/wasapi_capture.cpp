@@ -6,16 +6,9 @@
 #include <windows.h>
 #include <iostream>
 #include <vector>
-#include <initguid.h>
 
-// 定义 GUID
+// 只定义未在系统头文件中定义的GUID
 DEFINE_GUID(IID_IAudioSessionManager2, 0x77aa99a0, 0x1bd6, 0x484f, 0x8b, 0xc7, 0x2c, 0x65, 0x4c, 0x9a, 0x9b, 0x6f);
-
-// 定义常量
-const CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
-const IID IID_IMMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
-const IID IID_IAudioClient = __uuidof(IAudioClient);
-const IID IID_IAudioCaptureClient = __uuidof(IAudioCaptureClient);
 
 // WASAPI捕获类
 class WasapiCapture {

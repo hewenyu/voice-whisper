@@ -75,13 +75,41 @@ void audio_callback(void* userdata, Uint8* stream, int len) {
     }
 }
 
+// 列出音频设备
+void list_audio_devices() {
+    int count = SDL_GetNumAudioDevices(1);  // 1 表示录制设备
+    printf("\n可用的音频设备:\n");
+    printf("----------------------------------------\n");
+    for (int i = 0; i < count; i++) {
+        const char* name = SDL_GetAudioDeviceName(i, 1);
+        printf("%d: %s\n", i, name);
+    }
+    printf("----------------------------------------\n");
+}
+
+// 查找虚拟音频电缆设备
+int find_virtual_audio_cable() {
+    int count = SDL_GetNumAudioDevices(1);
+    for (int i = 0; i < count; i++) {
+        const char* name = SDL_GetAudioDeviceName(i, 1);
+        // 检查设备名称是否包含常见的虚拟音频电缆关键字
+        if (strstr(name, "CABLE Output") != nullptr ||
+            strstr(name, "VB-Audio") != nullptr ||
+            strstr(name, "Virtual Cable") != nullptr) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 // 显示帮助信息
 void show_usage(const char* program) {
     printf("Usage: %s [options] <model_path>\n\n", program);
     printf("选项:\n");
     printf("  -h,  --help                显示帮助信息\n");
+    printf("  -l,  --list                列出可用的音频设备\n");
+    printf("  -d,  --device N            选择音频设备ID (默认: 自动检测虚拟音频电缆)\n");
     printf("  -t,  --threads N           使用的线程数 (默认: 4)\n");
-    printf("  -c,  --capture N           音频设备ID (默认: -1)\n");
     printf("  -mt, --max-tokens N        最大token数 (默认: 32)\n");
     printf("  -ng, --no-gpu              禁用GPU加速\n");
     printf("  -l,  --language LANG       输入音频语言 (默认: auto)\n");
@@ -100,13 +128,77 @@ int main(int argc, char** argv) {
     #endif
 
     // 解析命令行参数
-    if (argc > 1) {
-        g_params.model = argv[1];  // 使用命令行参数中的模型路径
+    bool list_mode = false;
+    int device_id = 0;
+
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            show_usage(argv[0]);
+            return 0;
+        }
+        else if (arg == "-l" || arg == "--list") {
+            list_mode = true;
+        }
+        else if (arg == "-d" || arg == "--device") {
+            if (i + 1 < argc) {
+                device_id = std::stoi(argv[++i]);
+            }
+        }
+        else if (arg == "-t" || arg == "--threads") {
+            if (i + 1 < argc) g_params.n_threads = std::stoi(argv[++i]);
+        }
+        else if (arg == "-mt" || arg == "--max-tokens") {
+            if (i + 1 < argc) g_params.max_tokens = std::stoi(argv[++i]);
+        }
+        else if (arg == "-ng" || arg == "--no-gpu") {
+            g_params.use_gpu = false;
+        }
+        else if (arg == "-l" || arg == "--language") {
+            if (i + 1 < argc) g_params.language = argv[++i];
+        }
+        else if (arg == "-tr" || arg == "--translate") {
+            g_params.translate = true;
+        }
+        else if (arg == "-vt" || arg == "--vad-thold") {
+            if (i + 1 < argc) g_params.vad_thold = std::stof(argv[++i]);
+        }
+        else if (!g_params.model) {
+            g_params.model = argv[i];
+        }
+    }
+
+    // 如果没有指定设备ID，尝试自动检测虚拟音频电缆
+    if (device_id == 0) {
+        int vac_id = find_virtual_audio_cable();
+        if (vac_id >= 0) {
+            device_id = vac_id;
+            printf("已自动检测到虚拟音频电缆设备 (ID: %d)\n", device_id);
+        } else {
+            printf("警告: 未检测到虚拟音频电缆设备，将使用默认设备\n");
+            printf("请确保已安装虚拟音频电缆软件(如 VB-CABLE)，并将要录制的应用程序输出设置为虚拟音频电缆\n");
+            list_audio_devices();
+        }
     }
 
     // 初始化SDL
     if (SDL_Init(SDL_INIT_AUDIO) < 0) {
         fprintf(stderr, "SDL初始化失败: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    // 如果是列表模式，显示设备列表后退出
+    if (list_mode) {
+        list_audio_devices();
+        SDL_Quit();
+        return 0;
+    }
+
+    // 检查是否提供了模型路径
+    if (!g_params.model) {
+        fprintf(stderr, "错误: 需要提供模型路径\n");
+        show_usage(argv[0]);
+        SDL_Quit();
         return 1;
     }
 
@@ -120,13 +212,24 @@ int main(int argc, char** argv) {
     want.callback = audio_callback;
     want.userdata = &g_audio_buffer;
 
-    // 打开音频设备
-    SDL_AudioDeviceID dev = SDL_OpenAudioDevice(NULL, 1, &want, &have, 0);
-    if (dev == 0) {
-        fprintf(stderr, "无法打开音频设备: %s\n", SDL_GetError());
+    // 获取设备名称
+    const char* device_name = SDL_GetAudioDeviceName(device_id, 1);
+    if (!device_name) {
+        fprintf(stderr, "错误: 无效的音频设备ID: %d\n", device_id);
+        list_audio_devices();
         SDL_Quit();
         return 1;
     }
+
+    // 打开音频设备
+    SDL_AudioDeviceID dev = SDL_OpenAudioDevice(device_name, 1, &want, &have, 0);
+    if (dev == 0) {
+        fprintf(stderr, "无法打开音频设备 '%s': %s\n", device_name, SDL_GetError());
+        SDL_Quit();
+        return 1;
+    }
+
+    printf("使用音频设备: %s\n", device_name);
 
     // 初始化whisper
     struct whisper_context_params cparams = whisper_context_default_params();

@@ -1,3 +1,7 @@
+// Real-time speech recognition of input from a microphone
+//
+// A very quick-n-dirty implementation serving mainly as a proof of concept.
+//
 #include "common-sdl.h"
 #include "common.h"
 #include "whisper.h"
@@ -8,7 +12,7 @@
 #include <thread>
 #include <vector>
 #include <fstream>
-#include <ctime>
+
 
 // command-line parameters
 struct whisper_params {
@@ -33,8 +37,8 @@ struct whisper_params {
     bool use_gpu       = true;
     bool flash_attn    = false;
 
-    std::string language  = "zh";
-    std::string model     = "models/ggml-base.bin";
+    std::string language  = "en";
+    std::string model     = "models/ggml-base.en.bin";
     std::string fname_out;
 };
 
@@ -68,6 +72,7 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-sa"   || arg == "--save-audio")    { params.save_audio    = true; }
         else if (arg == "-ng"   || arg == "--no-gpu")        { params.use_gpu       = false; }
         else if (arg == "-fa"   || arg == "--flash-attn")    { params.flash_attn    = true; }
+
         else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
             whisper_print_usage(argc, argv, params);
@@ -131,6 +136,7 @@ int main(int argc, char ** argv) {
     params.max_tokens     = 0;
 
     // init audio
+
     audio_async audio(params.length_ms);
     if (!audio.init(params.capture_id, WHISPER_SAMPLE_RATE)) {
         fprintf(stderr, "%s: audio.init() failed!\n", __func__);
@@ -140,14 +146,15 @@ int main(int argc, char ** argv) {
     audio.resume();
 
     // whisper init
-    if (params.language != "auto" && whisper_lang_id(params.language.c_str()) == -1) {
+    if (params.language != "auto" && whisper_lang_id(params.language.c_str()) == -1){
         fprintf(stderr, "error: unknown language '%s'\n", params.language.c_str());
         whisper_print_usage(argc, argv, params);
         exit(0);
     }
 
     struct whisper_context_params cparams = whisper_context_default_params();
-    cparams.use_gpu = params.use_gpu;
+
+    cparams.use_gpu    = params.use_gpu;
     cparams.flash_attn = params.flash_attn;
 
     struct whisper_context * ctx = whisper_init_from_file_with_params(params.model.c_str(), cparams);
@@ -189,6 +196,7 @@ int main(int argc, char ** argv) {
     }
 
     int n_iter = 0;
+
     bool is_running = true;
 
     std::ofstream fout;
@@ -211,11 +219,10 @@ int main(int argc, char ** argv) {
 
         wavWriter.open(filename, WHISPER_SAMPLE_RATE, 16, 1);
     }
-
     printf("[Start speaking]\n");
     fflush(stdout);
 
-    auto t_last = std::chrono::high_resolution_clock::now();
+    auto t_last  = std::chrono::high_resolution_clock::now();
     const auto t_start = t_last;
 
     // main audio loop
@@ -223,7 +230,6 @@ int main(int argc, char ** argv) {
         if (params.save_audio) {
             wavWriter.write(pcmf32_new.data(), pcmf32_new.size());
         }
-
         // handle Ctrl + C
         is_running = sdl_poll_events();
 
@@ -232,6 +238,7 @@ int main(int argc, char ** argv) {
         }
 
         // process new audio
+
         if (!use_vad) {
             while (true) {
                 audio.get(params.step_ms, pcmf32_new);
@@ -272,6 +279,7 @@ int main(int argc, char ** argv) {
 
             if (t_diff < 2000) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
                 continue;
             }
 
@@ -281,6 +289,7 @@ int main(int argc, char ** argv) {
                 audio.get(params.length_ms, pcmf32);
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
                 continue;
             }
 
@@ -302,9 +311,11 @@ int main(int argc, char ** argv) {
             wparams.n_threads        = params.n_threads;
 
             wparams.audio_ctx        = params.audio_ctx;
-            wparams.tdrz_enable      = params.tinydiarize;
+
+            wparams.tdrz_enable      = params.tinydiarize; // [TDRZ]
 
             // disable temperature fallback
+            //wparams.temperature_inc  = -1.0f;
             wparams.temperature_inc  = params.no_fallback ? 0.0f : wparams.temperature_inc;
 
             wparams.prompt_tokens    = params.no_context ? nullptr : prompt_tokens.data();
@@ -319,12 +330,14 @@ int main(int argc, char ** argv) {
             {
                 if (!use_vad) {
                     printf("\33[2K\r");
+
                     // print long empty line to clear the previous line
                     printf("%s", std::string(100, ' ').c_str());
+
                     printf("\33[2K\r");
                 } else {
-                    const int64_t t1 = std::chrono::duration_cast<std::chrono::milliseconds>(t_last - t_start).count();
-                    const int64_t t0 = std::max(0.0, double(t1) - pcmf32.size()*1000.0/WHISPER_SAMPLE_RATE);
+                    const int64_t t1 = (t_last - t_start).count()/1000000;
+                    const int64_t t0 = std::max(0.0, t1 - pcmf32.size()*1000.0/WHISPER_SAMPLE_RATE);
 
                     printf("\n");
                     printf("### Transcription %d START | t0 = %d ms | t1 = %d ms\n", n_iter, (int) t0, (int) t1);
@@ -404,4 +417,4 @@ int main(int argc, char ** argv) {
     whisper_free(ctx);
 
     return 0;
-} 
+}

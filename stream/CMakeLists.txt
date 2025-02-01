@@ -1,39 +1,35 @@
 cmake_minimum_required(VERSION 3.10)
 
-# 设置源文件
-set(STREAM_SOURCES
-    main.cpp
-    common.cpp
-    common-sdl.cpp
+# 设置项目名称
+project(stream)
+
+# 设置C++标准
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# 添加可执行文件
+add_executable(stream
+    stream.cpp
+    ${CMAKE_SOURCE_DIR}/dep/whisper.cpp/examples/common.cpp
+    ${CMAKE_SOURCE_DIR}/dep/whisper.cpp/examples/common-sdl.cpp
 )
 
-# 创建可执行文件
-add_executable(stream ${STREAM_SOURCES})
-
-# 设置包含目录
+# 包含头文件目录
 target_include_directories(stream PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/dep/whisper.cpp
     ${CMAKE_SOURCE_DIR}/dep/whisper.cpp/examples
-    ${SDL2_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/dep/whisper.cpp
 )
 
 # 链接依赖库
 target_link_libraries(stream PRIVATE
     whisper
     SDL2::SDL2
+    audio_capture
 )
 
-# 设置输出目录
-set_target_properties(stream PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-)
-
-# 复制运行时依赖
 if(WIN32)
-    add_custom_command(TARGET stream POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:SDL2::SDL2>
-        $<TARGET_FILE_DIR:stream>
+    target_link_libraries(stream PRIVATE
+        ole32
+        oleaut32
     )
 endif() 

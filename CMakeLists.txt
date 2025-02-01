@@ -41,14 +41,6 @@ target_link_libraries(audio_capture PUBLIC
     avrt
 )
 
-# 复制models目录到输出目录
-add_custom_command(TARGET stream POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/bin/models"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${MODELS_DIR}/ggml-small.bin"
-        "${CMAKE_BINARY_DIR}/bin/models/"
-)
-
 # 启用优化
 if(MSVC)
     add_compile_options(/O2)

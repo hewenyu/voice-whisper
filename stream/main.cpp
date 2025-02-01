@@ -41,7 +41,8 @@ struct WhisperParams {
     bool use_gpu = true;        // 是否使用GPU
 
     const char* language = "auto"; // 默认使用auto自动检测
-    const char* model = "models/ggml-base.en.bin"; // 默认模型路径
+    const char* model = "models/ggml-base.bin"; // 默认模型路径
+    bool use_vad = true; // 是否使用VAD
 };
 
 // 语言代码映射

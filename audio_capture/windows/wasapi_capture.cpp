@@ -420,4 +420,140 @@ int wasapi_capture_get_format(void* handle, AudioFormat* format) {
     return capture->get_format(format) ? 1 : 0;
 }
 
+}
+
+// Implementation of audio_async_wasapi class
+audio_async_wasapi::audio_async_wasapi(int len_ms) : 
+    wasapi_handle_(nullptr),
+    len_ms_(len_ms),
+    sample_rate_(16000),
+    running_(false),
+    buffer_pos_(0),
+    buffer_len_(0) {
+    // Initialize buffer size based on len_ms
+    audio_buffer_.resize((sample_rate_ * len_ms_) / 1000);
+}
+
+audio_async_wasapi::~audio_async_wasapi() {
+    if (wasapi_handle_) {
+        wasapi_capture_stop(wasapi_handle_);
+        wasapi_capture_destroy(wasapi_handle_);
+    }
+}
+
+bool audio_async_wasapi::init(int capture_id, int sample_rate) {
+    if (wasapi_handle_) {
+        return true;  // Already initialized
+    }
+
+    sample_rate_ = sample_rate;
+    wasapi_handle_ = wasapi_capture_create();
+    if (!wasapi_handle_) {
+        return false;
+    }
+
+    // Set audio format
+    AudioFormat format;
+    format.sample_rate = sample_rate_;
+    format.channels = 1;
+    format.bits_per_sample = 16;
+
+    // Initialize WASAPI capture
+    if (!wasapi_capture_initialize(wasapi_handle_)) {
+        wasapi_capture_destroy(wasapi_handle_);
+        wasapi_handle_ = nullptr;
+        return false;
+    }
+
+    // Set the callback
+    wasapi_capture_set_callback(wasapi_handle_, audio_callback_wrapper, this);
+
+    return true;
+}
+
+bool audio_async_wasapi::resume() {
+    if (!wasapi_handle_ || running_) {
+        return false;
+    }
+
+    if (!wasapi_capture_start(wasapi_handle_)) {
+        return false;
+    }
+
+    running_ = true;
+    return true;
+}
+
+bool audio_async_wasapi::pause() {
+    if (!wasapi_handle_ || !running_) {
+        return false;
+    }
+
+    wasapi_capture_stop(wasapi_handle_);
+    running_ = false;
+    return true;
+}
+
+bool audio_async_wasapi::clear() {
+    if (!wasapi_handle_ || !running_) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    buffer_pos_ = 0;
+    buffer_len_ = 0;
+    return true;
+}
+
+void audio_async_wasapi::get(int ms, std::vector<float>& result) {
+    result.clear();
+
+    if (!wasapi_handle_ || !running_) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (ms <= 0) {
+        ms = len_ms_;
+    }
+
+    size_t n_samples = (sample_rate_ * ms) / 1000;
+    if (n_samples > buffer_len_) {
+        n_samples = buffer_len_;
+    }
+
+    result.resize(n_samples);
+
+    int s0 = buffer_pos_ - n_samples;
+    if (s0 < 0) {
+        s0 += audio_buffer_.size();
+    }
+
+    if (s0 + n_samples > audio_buffer_.size()) {
+        const size_t n0 = audio_buffer_.size() - s0;
+        memcpy(result.data(), &audio_buffer_[s0], n0 * sizeof(float));
+        memcpy(&result[n0], &audio_buffer_[0], (n_samples - n0) * sizeof(float));
+    } else {
+        memcpy(result.data(), &audio_buffer_[s0], n_samples * sizeof(float));
+    }
+}
+
+void audio_async_wasapi::audio_callback_wrapper(void* user_data, float* buffer, int frames) {
+    auto* self = static_cast<audio_async_wasapi*>(user_data);
+    
+    std::lock_guard<std::mutex> lock(self->mutex_);
+
+    // Copy data to circular buffer
+    if (self->buffer_pos_ + frames > self->audio_buffer_.size()) {
+        const size_t n0 = self->audio_buffer_.size() - self->buffer_pos_;
+        memcpy(&self->audio_buffer_[self->buffer_pos_], buffer, n0 * sizeof(float));
+        memcpy(&self->audio_buffer_[0], buffer + n0, (frames - n0) * sizeof(float));
+        self->buffer_pos_ = (self->buffer_pos_ + frames) % self->audio_buffer_.size();
+        self->buffer_len_ = self->audio_buffer_.size();
+    } else {
+        memcpy(&self->audio_buffer_[self->buffer_pos_], buffer, frames * sizeof(float));
+        self->buffer_pos_ = (self->buffer_pos_ + frames) % self->audio_buffer_.size();
+        self->buffer_len_ = std::min(self->buffer_len_ + frames, self->audio_buffer_.size());
+    }
 } 

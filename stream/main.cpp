@@ -135,9 +135,9 @@ void whisper_processing_thread(struct whisper_context* ctx) {
     wparams.n_threads = g_params.n_threads;
     wparams.audio_ctx = g_params.audio_ctx;
     wparams.max_tokens = g_params.max_tokens;
-    wparams.single_segment = true;
-    wparams.no_context = true;    // 禁用上下文
-    wparams.no_timestamps = false; // 启用时间戳
+    wparams.single_segment = false;  // 允许多段识别
+    wparams.no_context = true;      // 禁用上下文
+    wparams.no_timestamps = false;   // 启用时间戳
 
     // VAD 参数
     const float vad_thold = g_params.vad_thold;
@@ -172,6 +172,11 @@ void whisper_processing_thread(struct whisper_context* ctx) {
             !g_params.no_timestamps);
 
     printf("\n");
+    printf("[Start speaking]\n");
+    fflush(stdout);
+
+    std::string previous_text;  // 用于存储上一次的文本
+    int n_iter = 0;            // 迭代计数
 
     while (g_is_running) {
         // 从音频缓冲区获取数据
@@ -214,52 +219,66 @@ void whisper_processing_thread(struct whisper_context* ctx) {
 
             // 检查是否有语音活动
             bool vad_enabled = true;  // 启用VAD
+            bool speech_detected = false;
+
             if (vad_enabled) {
-                bool speech_detected = false;
                 const int n_samples_per_ms = WHISPER_SAMPLE_RATE / 1000;
                 const int n_samples_window = 100 * n_samples_per_ms; // 100ms窗口
 
                 for (int i = 0; i < (int)pcmf32.size() - n_samples_window; i += n_samples_window) {
                     float sum = 0.0f;
+                    float max_abs = 0.0f;
                     for (int j = 0; j < n_samples_window; j++) {
-                        sum += fabs(pcmf32[i + j]);
+                        float abs_val = fabs(pcmf32[i + j]);
+                        sum += abs_val;
+                        max_abs = std::max(max_abs, abs_val);
                     }
                     float avg = sum / n_samples_window;
-                    if (avg > vad_thold) {
+                    
+                    // 使用平均值和最大值的组合来检测语音
+                    if (avg > vad_thold || max_abs > vad_thold * 2.0f) {
                         speech_detected = true;
                         break;
                     }
                 }
+            } else {
+                speech_detected = true;  // 如果禁用VAD，总是处理音频
+            }
 
-                if (!speech_detected) {
+            if (speech_detected) {
+                // 处理音频
+                if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
+                    fprintf(stderr, "Failed to process audio\n");
                     continue;
                 }
-            }
 
-            // 处理音频
-            if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
-                fprintf(stderr, "Failed to process audio\n");
-                continue;
-            }
-
-            // 输出识别结果
-            const int n_segments = whisper_full_n_segments(ctx);
-            for (int i = 0; i < n_segments; ++i) {
-                const char* text = whisper_full_get_segment_text(ctx, i);
-                const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
-                const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
-
-                if (strlen(text) > 0) {  // 只输出非空文本
-                    if (g_params.no_timestamps) {
-                        printf("%s", text);
-                    } else {
-                        printf("[%d:%02d.%03d -> %d:%02d.%03d] %s\n",
-                            (int)(t0 / 60000), (int)((t0 / 1000) % 60), (int)(t0 % 1000),
-                            (int)(t1 / 60000), (int)((t1 / 1000) % 60), (int)(t1 % 1000),
-                            text);
+                // 输出识别结果
+                const int n_segments = whisper_full_n_segments(ctx);
+                for (int i = 0; i < n_segments; ++i) {
+                    const char* text = whisper_full_get_segment_text(ctx, i);
+                    
+                    if (strlen(text) > 0) {  // 只输出非空文本
+                        std::string current_text = text;
+                        
+                        // 如果文本有变化，才输出
+                        if (current_text != previous_text) {
+                            // 清除当前行
+                            printf("\33[2K\r");
+                            
+                            // 输出新文本
+                            printf("%s", text);
+                            fflush(stdout);
+                            
+                            previous_text = current_text;
+                        }
                     }
-                    fflush(stdout);
                 }
+            }
+
+            // 每处理一定次数后换行
+            if (++n_iter % 10 == 0) {
+                printf("\n");
+                previous_text.clear();  // 清除上一次的文本
             }
         }
 

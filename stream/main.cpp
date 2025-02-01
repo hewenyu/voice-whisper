@@ -38,7 +38,7 @@ struct WhisperParams {
     bool use_gpu = true;        // 是否使用GPU
 
     std::string language = "auto"; // 默认使用auto自动检测
-    std::string translate_to = ""; // 翻译目标语言
+    std::string model = "models/ggml-base.en.bin"; // 默认模型路径
 };
 
 // 语言代码映射
@@ -66,7 +66,6 @@ void show_usage(const char* program) {
     wprintf(L"  -ng, --no-gpu             禁用GPU加速\n");
     wprintf(L"  -l,  --language <lang>     输入音频语言 (默认: auto)\n");
     wprintf(L"  -tr, --translate           启用翻译\n");
-    wprintf(L"  -tt, --translate-to <lang> 翻译目标语言 (默认: en)\n");
     wprintf(L"  -ts, --timestamps          显示时间戳\n");
     wprintf(L"  -ps, --print-special       显示特殊标记\n");
     wprintf(L"  -vt, --vad-thold <n>       VAD阈值 [0-1] (默认: 0.6)\n");
@@ -142,12 +141,6 @@ void whisper_processing_thread(struct whisper_context* ctx) {
     // VAD 参数
     const float vad_thold = g_params.vad_thold;
     const float freq_thold = g_params.freq_thold;
-
-    // 如果指定了翻译目标语言
-    if (!g_params.translate_to.empty()) {
-        wparams.translate = true;
-        wparams.language = g_params.translate_to.c_str();
-    }
 
     std::vector<float> pcmf32;
     std::vector<float> pcmf32_old;
@@ -325,16 +318,6 @@ int main(int argc, char** argv) {
         else if (arg == "-tr" || arg == "--translate") {
             g_params.translate = true;
         }
-        else if (arg == "-tt" || arg == "--translate-to") {
-            if (i + 1 < argc) {
-                std::string lang = argv[++i];
-                if (!is_valid_language(lang)) {
-                    fprintf(stderr, "Error: 不支持的目标语言代码: %s\n", lang.c_str());
-                    return 1;
-                }
-                g_params.translate_to = lang;
-            }
-        }
         else if (arg == "-ts" || arg == "--timestamps") {
             g_params.no_timestamps = false;
         }
@@ -404,9 +387,6 @@ int main(int argc, char** argv) {
     printf("输入语言: %s\n", LANGUAGE_CODES.at(g_params.language).c_str());
     if (g_params.translate) {
         printf("翻译: 开启\n");
-        if (!g_params.translate_to.empty()) {
-            printf("翻译目标语言: %s\n", LANGUAGE_CODES.at(g_params.translate_to).c_str());
-        }
     }
     printf("线程数: %d\n", g_params.n_threads);
     printf("GPU加速: %s\n", g_params.use_gpu ? "开启" : "关闭");

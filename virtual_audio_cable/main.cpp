@@ -12,6 +12,7 @@
 #include <vector>
 #include <memory>
 #include <sstream>
+#include <string>
 #include "../audio_capture/windows/wasapi_capture.h"
 
 // 定义常量
@@ -62,6 +63,7 @@ private:
     DWORD task_index_;
     void* wasapi_capture_;
     WAVEFORMATEX wave_format_;
+    DWORD target_process_id_;
 
     static void CALLBACK audio_callback(void* user_data, float* data, int frame_count) {
         auto* device = static_cast<VirtualAudioDevice*>(user_data);
@@ -275,10 +277,110 @@ private:
         return true;
     }
 
+    bool list_applications() {
+        IMMDeviceEnumerator* enumerator = nullptr;
+        IMMDevice* device = nullptr;
+        IAudioSessionManager2* session_manager = nullptr;
+        HRESULT hr;
+
+        // 创建设备枚举器
+        hr = CoCreateInstance(
+            __uuidof(MMDeviceEnumerator), nullptr,
+            CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+            (void**)&enumerator
+        );
+        if (FAILED(hr)) {
+            std::cerr << "Failed to create device enumerator: " << GetErrorMessage(hr) << std::endl;
+            return false;
+        }
+
+        // 获取默认音频输出设备
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to get default audio endpoint" << std::endl;
+            enumerator->Release();
+            return false;
+        }
+
+        // 获取会话管理器
+        hr = device->Activate(
+            __uuidof(IAudioSessionManager2),
+            CLSCTX_ALL,
+            nullptr,
+            (void**)&session_manager
+        );
+
+        device->Release();
+        enumerator->Release();
+
+        if (FAILED(hr)) {
+            std::cerr << "Failed to get audio session manager" << std::endl;
+            return false;
+        }
+
+        // 获取会话枚举器
+        IAudioSessionEnumerator* sessionEnumerator = nullptr;
+        hr = session_manager->GetSessionEnumerator(&sessionEnumerator);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to get session enumerator" << std::endl;
+            session_manager->Release();
+            return false;
+        }
+
+        // 获取会话数量
+        int sessionCount;
+        hr = sessionEnumerator->GetCount(&sessionCount);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to get session count" << std::endl;
+            sessionEnumerator->Release();
+            session_manager->Release();
+            return false;
+        }
+
+        std::cout << "Available audio sessions:" << std::endl;
+        std::cout << "PID\tProcess Name" << std::endl;
+        std::cout << "------------------------" << std::endl;
+
+        // 遍历所有会话
+        for (int i = 0; i < sessionCount; i++) {
+            IAudioSessionControl* sessionControl = nullptr;
+            hr = sessionEnumerator->GetSession(i, &sessionControl);
+            if (FAILED(hr)) continue;
+
+            IAudioSessionControl2* sessionControl2 = nullptr;
+            hr = sessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&sessionControl2);
+            sessionControl->Release();
+            if (FAILED(hr)) continue;
+
+            // 获取进程ID
+            DWORD processId;
+            hr = sessionControl2->GetProcessId(&processId);
+            if (SUCCEEDED(hr) && processId != 0) {
+                HANDLE processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+                if (processHandle) {
+                    wchar_t processName[MAX_PATH];
+                    DWORD size = MAX_PATH;
+                    if (QueryFullProcessImageNameW(processHandle, 0, processName, &size)) {
+                        // 获取文件名部分
+                        wchar_t* fileName = wcsrchr(processName, L'\\');
+                        fileName = fileName ? fileName + 1 : processName;
+                        std::wcout << processId << L"\t" << fileName << std::endl;
+                    }
+                    CloseHandle(processHandle);
+                }
+            }
+            sessionControl2->Release();
+        }
+
+        sessionEnumerator->Release();
+        session_manager->Release();
+        return true;
+    }
+
 public:
     VirtualAudioDevice() : running_(false), audio_client_(nullptr), capture_client_(nullptr),
                           render_client_(nullptr), audio_event_(nullptr), 
-                          render_thread_handle_(nullptr), task_index_(0) {
+                          render_thread_handle_(nullptr), task_index_(0), target_process_id_(0) {
         wasapi_capture_ = wasapi_capture_create();
     }
 
@@ -289,7 +391,7 @@ public:
         }
     }
 
-    bool initialize() {
+    bool initialize(DWORD target_pid = 0) {
         // 初始化WASAPI捕获
         if (!wasapi_capture_initialize(wasapi_capture_)) {
             std::cerr << "Failed to initialize WASAPI capture" << std::endl;
@@ -309,7 +411,14 @@ public:
             return false;
         }
 
+        // 保存目标PID，在start时使用
+        target_process_id_ = target_pid;
+
         return true;
+    }
+
+    bool list_apps() {
+        return list_applications();
     }
 
     bool start() {
@@ -317,13 +426,26 @@ public:
 
         // 启动音频客户端
         HRESULT hr = audio_client_->Start();
-        if (FAILED(hr)) return false;
-
-        // 启动WASAPI捕获
-        if (!wasapi_capture_start(wasapi_capture_)) {
-            audio_client_->Stop();
-            std::cerr << "Failed to start WASAPI capture" << std::endl;
+        if (FAILED(hr)) {
+            std::cerr << "Failed to start audio client: " << GetErrorMessage(hr) << std::endl;
             return false;
+        }
+
+        // 如果有指定的目标PID，先设置进程捕获
+        if (target_process_id_ != 0) {
+            std::cout << "Starting capture for process " << target_process_id_ << "..." << std::endl;
+            if (!wasapi_capture_start_process(wasapi_capture_, target_process_id_)) {
+                std::cerr << "Failed to start capturing specific process" << std::endl;
+                audio_client_->Stop();
+                return false;
+            }
+        } else {
+            // 启动普通WASAPI捕获
+            if (!wasapi_capture_start(wasapi_capture_)) {
+                std::cerr << "Failed to start WASAPI capture" << std::endl;
+                audio_client_->Stop();
+                return false;
+            }
         }
 
         running_ = true;
@@ -365,7 +487,15 @@ public:
     }
 };
 
-int main() {
+void print_usage() {
+    std::cout << "Usage:" << std::endl;
+    std::cout << "  virtual_audio_cable [options]" << std::endl;
+    std::cout << "Options:" << std::endl;
+    std::cout << "  --list    List all applications with audio sessions" << std::endl;
+    std::cout << "  -p <pid>  Capture audio from specific process ID" << std::endl;
+}
+
+int main(int argc, char* argv[]) {
     // 初始化COM
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
@@ -374,10 +504,35 @@ int main() {
     }
 
     VirtualAudioDevice device;
-    if (!device.initialize()) {
-        std::cerr << "Failed to initialize virtual audio device" << std::endl;
-        CoUninitialize();
-        return 1;
+
+    // 解析命令行参数
+    if (argc > 1) {
+        std::string arg = argv[1];
+        if (arg == "--list") {
+            bool result = device.list_apps();
+            CoUninitialize();
+            return result ? 0 : 1;
+        }
+        else if (arg == "-p" && argc > 2) {
+            DWORD pid = static_cast<DWORD>(std::stoul(argv[2]));
+            if (!device.initialize(pid)) {
+                std::cerr << "Failed to initialize virtual audio device for PID " << pid << std::endl;
+                CoUninitialize();
+                return 1;
+            }
+        }
+        else {
+            print_usage();
+            CoUninitialize();
+            return 1;
+        }
+    }
+    else {
+        if (!device.initialize()) {
+            std::cerr << "Failed to initialize virtual audio device" << std::endl;
+            CoUninitialize();
+            return 1;
+        }
     }
 
     if (!device.start()) {

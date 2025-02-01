@@ -37,7 +37,7 @@ struct WhisperParams {
     bool no_timestamps = false;  // 是否显示时间戳
     bool use_gpu = true;        // 是否使用GPU
 
-    std::string language = "en"; // 输入语言
+    std::string language = "auto"; // 默认使用auto自动检测
     std::string translate_to = ""; // 翻译目标语言
 };
 
@@ -64,7 +64,7 @@ void show_usage(const char* program) {
     wprintf(L"  -t,  --threads <n>         使用的线程数 (默认: 4)\n");
     wprintf(L"  -mt, --max-tokens <n>      最大token数 (默认: 32)\n");
     wprintf(L"  -ng, --no-gpu             禁用GPU加速\n");
-    wprintf(L"  -l,  --language <lang>     输入音频语言 (默认: zh)\n");
+    wprintf(L"  -l,  --language <lang>     输入音频语言 (默认: auto)\n");
     wprintf(L"  -tr, --translate           启用翻译\n");
     wprintf(L"  -tt, --translate-to <lang> 翻译目标语言 (默认: en)\n");
     wprintf(L"  -ts, --timestamps          显示时间戳\n");

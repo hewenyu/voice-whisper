@@ -416,11 +416,24 @@ private:
         // 注册虚拟设备
         std::cout << "Calling RegisterAudioEndpoint..." << std::endl;
         GUID moduleId = VIRTUAL_AUDIO_GUID;  // 创建一个非const副本
+        
+        // 尝试先卸载可能存在的设备
+        std::cout << "Attempting to unregister existing endpoint..." << std::endl;
+        hr = policy_config_->UnregisterAudioEndpoint(device_id_.c_str());
+        if (FAILED(hr)) {
+            std::cout << "No existing endpoint found or failed to unregister: 0x" 
+                      << std::hex << hr << std::dec << std::endl;
+        } else {
+            std::cout << "Successfully unregistered existing endpoint" << std::endl;
+        }
+
+        // 注册新的设备
+        std::cout << "Registering new audio endpoint..." << std::endl;
         hr = policy_config_->RegisterAudioEndpoint(
             device_id_.c_str(),
             L"Virtual Audio Device",
-            L"Virtual",
-            eRender,  // 改为eRender，因为我们要创建一个播放设备
+            L"Virtual Audio Device",  // 使用更详细的描述
+            eRender,
             DEVICE_STATE_ACTIVE,
             &moduleId
         );
@@ -438,6 +451,7 @@ private:
             }
             else if (hr == E_INVALIDARG) {
                 std::cerr << "Invalid argument passed to RegisterAudioEndpoint." << std::endl;
+                std::wcerr << L"Device ID: " << device_id_ << std::endl;
             }
             
             return false;
@@ -460,13 +474,33 @@ private:
             
             if (SUCCEEDED(hr)) {
                 std::cout << "Device verification successful" << std::endl;
+                
+                // 获取设备属性以验证
+                IPropertyStore* props = nullptr;
+                hr = device->OpenPropertyStore(STGM_READ, &props);
+                if (SUCCEEDED(hr)) {
+                    PROPVARIANT friendlyName;
+                    PropVariantInit(&friendlyName);
+                    hr = props->GetValue(PKEY_Device_FriendlyName, &friendlyName);
+                    if (SUCCEEDED(hr)) {
+                        std::wcout << L"Device friendly name: " << friendlyName.pwszVal << std::endl;
+                        PropVariantClear(&friendlyName);
+                    }
+                    props->Release();
+                }
+                
                 device->Release();
             } else {
                 std::cerr << "Device verification failed: " << GetErrorMessage(hr) << std::endl;
+                std::cerr << "Error code: 0x" << std::hex << hr << std::dec << std::endl;
             }
             
             enumerator->Release();
         }
+
+        // 等待一小段时间，让系统完成设备注册
+        std::cout << "Waiting for device registration to complete..." << std::endl;
+        Sleep(1000);  // 等待1秒
 
         return true;
     }

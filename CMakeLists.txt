@@ -21,6 +21,9 @@ add_subdirectory(stream)
 # 添加virtual_audio_cable子目录
 add_subdirectory(virtual_audio_cable)
 
+# 添加stream_app子目录
+add_subdirectory(stream_app)
+
 # 设置音频捕获源文件
 set(AUDIO_CAPTURE_SOURCES
     audio_capture/windows/wasapi_capture.cpp

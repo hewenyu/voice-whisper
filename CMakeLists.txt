@@ -15,6 +15,9 @@ find_package(SDL2 REQUIRED)
 # 添加whisper.cpp子目录
 add_subdirectory(dep/whisper.cpp)
 
+# 添加stream子目录
+add_subdirectory(stream)
+
 # 添加virtual_audio_cable子目录
 add_subdirectory(virtual_audio_cable)
 
@@ -38,32 +41,6 @@ target_link_libraries(audio_capture PUBLIC
     avrt
 )
 
-# 设置主程序源文件
-set(STREAM_SOURCES
-    stream/main.cpp
-)
-
-# 创建可执行文件
-add_executable(stream ${STREAM_SOURCES})
-
-# 设置包含目录
-target_include_directories(stream PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/dep/whisper.cpp
-    ${SDL2_INCLUDE_DIRS}
-)
-
-# 链接依赖库
-target_link_libraries(stream PRIVATE
-    whisper
-    audio_capture
-    ${SDL2_LIBRARIES}
-)
-
-# 设置输出目录
-set_target_properties(stream PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-)
-
 # 复制models目录到输出目录
 add_custom_command(TARGET stream POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/bin/models"
@@ -74,18 +51,13 @@ add_custom_command(TARGET stream POST_BUILD
 
 # 启用优化
 if(MSVC)
-    target_compile_options(stream PRIVATE /O2)
+    add_compile_options(/O2)
 else()
-    target_compile_options(stream PRIVATE -O3)
+    add_compile_options(-O3)
 endif()
 
 # 设置Windows特定选项
 if(WIN32)
     # 使用Unicode字符集
     add_definitions(-DUNICODE -D_UNICODE)
-    
-    # 设置为Windows子系统
-    set_target_properties(stream PROPERTIES
-        WIN32_EXECUTABLE FALSE
-    )
 endif() 

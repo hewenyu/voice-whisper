@@ -8,6 +8,7 @@
 #include <mutex>
 #include <queue>
 #include <map>
+#include <windows.h>
 
 // 音频缓冲队列
 struct AudioBuffer {
@@ -45,32 +46,32 @@ WhisperParams g_params;
 
 // 显示帮助信息
 void show_usage(const char* program) {
-    fprintf(stderr, "Usage: %s [options] <model_path>\n", program);
-    fprintf(stderr, "\n音频捕获选项:\n");
-    fprintf(stderr, "  -h,  --help                显示帮助信息\n");
-    fprintf(stderr, "  -l,  --list                列出可用的音频程序\n");
-    fprintf(stderr, "  -p,  --pid <pid>           捕获指定PID的程序音频\n");
-    fprintf(stderr, "\nWhisper选项:\n");
-    fprintf(stderr, "  -t,  --threads <n>         使用的线程数 (默认: 4)\n");
-    fprintf(stderr, "  -mt, --max-tokens <n>      最大token数 (默认: 32)\n");
-    fprintf(stderr, "  -ng, --no-gpu             禁用GPU加速\n");
-    fprintf(stderr, "  -l,  --language <lang>     输入音频语言 (默认: zh)\n");
-    fprintf(stderr, "  -tr, --translate           启用翻译\n");
-    fprintf(stderr, "  -tt, --translate-to <lang> 翻译目标语言 (默认: en)\n");
-    fprintf(stderr, "  -ts, --timestamps          显示时间戳\n");
-    fprintf(stderr, "  -ps, --print-special       显示特殊标记\n");
-    fprintf(stderr, "  -vt, --vad-thold <n>       VAD阈值 [0-1] (默认: 0.6)\n");
-    fprintf(stderr, "  -sm, --step-ms <n>         音频步长(ms) (默认: 3000)\n");
-    fprintf(stderr, "  -lm, --length-ms <n>       音频长度(ms) (默认: 10000)\n");
-    fprintf(stderr, "\n支持的语言:\n");
+    wprintf(L"Usage: %hs [options] <model_path>\n", program);
+    wprintf(L"\n音频捕获选项:\n");
+    wprintf(L"  -h,  --help                显示帮助信息\n");
+    wprintf(L"  -l,  --list                列出可用的音频程序\n");
+    wprintf(L"  -p,  --pid <pid>           捕获指定PID的程序音频\n");
+    wprintf(L"\nWhisper选项:\n");
+    wprintf(L"  -t,  --threads <n>         使用的线程数 (默认: 4)\n");
+    wprintf(L"  -mt, --max-tokens <n>      最大token数 (默认: 32)\n");
+    wprintf(L"  -ng, --no-gpu             禁用GPU加速\n");
+    wprintf(L"  -l,  --language <lang>     输入音频语言 (默认: zh)\n");
+    wprintf(L"  -tr, --translate           启用翻译\n");
+    wprintf(L"  -tt, --translate-to <lang> 翻译目标语言 (默认: en)\n");
+    wprintf(L"  -ts, --timestamps          显示时间戳\n");
+    wprintf(L"  -ps, --print-special       显示特殊标记\n");
+    wprintf(L"  -vt, --vad-thold <n>       VAD阈值 [0-1] (默认: 0.6)\n");
+    wprintf(L"  -sm, --step-ms <n>         音频步长(ms) (默认: 3000)\n");
+    wprintf(L"  -lm, --length-ms <n>       音频长度(ms) (默认: 10000)\n");
+    wprintf(L"\n支持的语言:\n");
     for (const auto& lang : LANGUAGE_CODES) {
-        fprintf(stderr, "  %-6s : %s\n", lang.first.c_str(), lang.second.c_str());
+        wprintf(L"  %-6hs : %hs\n", lang.first.c_str(), lang.second.c_str());
     }
-    fprintf(stderr, "\nExample:\n");
-    fprintf(stderr, "  %s --list                                    # 列出可用音频程序\n", program);
-    fprintf(stderr, "  %s models/ggml-base.bin                      # 捕获系统音频\n", program);
-    fprintf(stderr, "  %s -p 1234 --language en models/ggml-base.bin # 捕获PID为1234的英语音频\n", program);
-    fprintf(stderr, "  %s --translate --translate-to ja models/ggml-base.bin # 翻译成日语\n", program);
+    wprintf(L"\nExample:\n");
+    wprintf(L"  %hs --list                                    # 列出可用音频程序\n", program);
+    wprintf(L"  %hs models/ggml-base.bin                      # 捕获系统音频\n", program);
+    wprintf(L"  %hs -p 1234 --language en models/ggml-base.bin # 捕获PID为1234的英语音频\n", program);
+    wprintf(L"  %hs --translate --translate-to ja models/ggml-base.bin # 翻译成日语\n", program);
 }
 
 // 验证语言代码
@@ -96,7 +97,7 @@ void list_audio_applications(void* capture) {
     printf("----------------------------------------\n");
     
     for (int i = 0; i < count; i++) {
-        printf("%u\t%ls\n", apps[i].pid, apps[i].name);
+        wprintf(L"%u\t%ls\n", apps[i].pid, apps[i].name);
     }
     printf("----------------------------------------\n");
 }
@@ -181,6 +182,11 @@ void whisper_processing_thread(struct whisper_context* ctx) {
 }
 
 int main(int argc, char** argv) {
+    // 设置控制台代码页为UTF-8
+    SetConsoleOutputCP(CP_UTF8);
+    // 启用控制台的 UTF-8 支持
+    SetConsoleCP(CP_UTF8);
+    
     bool list_mode = false;
     unsigned int target_pid = 0;
     const char* model_path = nullptr;
@@ -294,19 +300,19 @@ int main(int argc, char** argv) {
     }
 
     // 打印当前设置
-    printf("\n当前设置:\n");
-    printf("----------------------------------------\n");
-    printf("输入语言: %s\n", LANGUAGE_CODES.at(g_params.language).c_str());
+    wprintf(L"\n当前设置:\n");
+    wprintf(L"----------------------------------------\n");
+    wprintf(L"输入语言: %hs\n", LANGUAGE_CODES.at(g_params.language).c_str());
     if (g_params.translate) {
-        printf("翻译: 开启\n");
+        wprintf(L"翻译: 开启\n");
         if (!g_params.translate_to.empty()) {
-            printf("翻译目标语言: %s\n", LANGUAGE_CODES.at(g_params.translate_to).c_str());
+            wprintf(L"翻译目标语言: %hs\n", LANGUAGE_CODES.at(g_params.translate_to).c_str());
         }
     }
-    printf("线程数: %d\n", g_params.threads);
-    printf("GPU加速: %s\n", g_params.use_gpu ? "开启" : "关闭");
-    printf("时间戳: %s\n", g_params.no_timestamps ? "关闭" : "开启");
-    printf("----------------------------------------\n\n");
+    wprintf(L"线程数: %d\n", g_params.threads);
+    wprintf(L"GPU加速: %hs\n", g_params.use_gpu ? "开启" : "关闭");
+    wprintf(L"时间戳: %hs\n", g_params.no_timestamps ? "关闭" : "开启");
+    wprintf(L"----------------------------------------\n\n");
 
     // 设置音频回调
     wasapi_capture_set_callback(capture, (audio_callback)audio_data_callback, &g_audio_buffer);

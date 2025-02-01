@@ -11,6 +11,7 @@
 #include <mutex>
 #include <vector>
 #include <memory>
+#include <sstream>
 #include "../audio_capture/windows/wasapi_capture.h"
 
 // 定义常量
@@ -19,6 +20,23 @@ const REFERENCE_TIME REFTIMES_PER_MILLISEC = 10000;
 const int SAMPLE_RATE = 16000;
 const int BITS_PER_SAMPLE = 16;
 const int BLOCK_ALIGN = 2;
+
+// 辅助函数：将HRESULT转换为错误信息
+std::string GetErrorMessage(HRESULT hr) {
+    char* message = nullptr;
+    FormatMessageA(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr,
+        hr,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        reinterpret_cast<LPSTR>(&message),
+        0,
+        nullptr
+    );
+    std::string result = message ? message : "Unknown error";
+    LocalFree(message);
+    return result;
+}
 
 // 音频缓冲队列
 class AudioBuffer {
@@ -37,6 +55,7 @@ private:
     std::atomic<bool> running_;
     std::thread render_thread_;
     IAudioClient* audio_client_;
+    IAudioCaptureClient* capture_client_;
     IAudioRenderClient* render_client_;
     HANDLE audio_event_;
     HANDLE render_thread_handle_;
@@ -58,74 +77,87 @@ private:
     }
 
     void render_proc() {
-        HANDLE wait_array[1] = { audio_event_ };
+        const DWORD sleep_time = 10; // 10ms sleep between polls
 
         while (running_) {
-            DWORD wait_result = WaitForMultipleObjects(1, wait_array, FALSE, INFINITE);
-            if (wait_result != WAIT_OBJECT_0) break;
-
             UINT32 padding = 0;
             HRESULT hr = audio_client_->GetCurrentPadding(&padding);
-            if (FAILED(hr)) break;
+            if (FAILED(hr)) {
+                std::cerr << "Failed to get current padding: " << GetErrorMessage(hr) << std::endl;
+                break;
+            }
 
-            UINT32 buffer_size = wave_format_.nSamplesPerSec / 100;  // 10ms buffer
-            UINT32 available_frames = buffer_size - padding;
-            if (available_frames == 0) continue;
+            BYTE* data = nullptr;
+            UINT32 num_frames_to_read = 0;
+            DWORD flags = 0;
+            UINT64 position = 0;
+            UINT64 qpc_position = 0;
 
-            BYTE* buffer_data = nullptr;
-            hr = render_client_->GetBuffer(available_frames, &buffer_data);
-            if (FAILED(hr)) break;
+            hr = capture_client_->GetBuffer(
+                &data,
+                &num_frames_to_read,
+                &flags,
+                &position,
+                &qpc_position
+            );
 
-            std::lock_guard<std::mutex> lock(queue_mutex_);
-            if (!buffer_queue_.empty()) {
-                AudioBuffer& audio_buffer = buffer_queue_.front();
-                size_t frames_to_copy = std::min(static_cast<size_t>(available_frames), audio_buffer.size);
-                
-                float* dest_buffer = reinterpret_cast<float*>(buffer_data);
-                memcpy(dest_buffer, audio_buffer.data.data(), frames_to_copy * sizeof(float));
-                
-                if (frames_to_copy < audio_buffer.size) {
-                    audio_buffer.data.erase(audio_buffer.data.begin(), audio_buffer.data.begin() + frames_to_copy);
-                    audio_buffer.size -= frames_to_copy;
-                } else {
-                    buffer_queue_.pop();
+            if (FAILED(hr)) {
+                if (hr != AUDCLNT_S_BUFFER_EMPTY) {
+                    std::cerr << "Failed to get capture buffer: " << GetErrorMessage(hr) << std::endl;
+                    break;
                 }
-                
-                render_client_->ReleaseBuffer(frames_to_copy, 0);
-            } else {
-                render_client_->ReleaseBuffer(available_frames, AUDCLNT_BUFFERFLAGS_SILENT);
+                Sleep(sleep_time);
+                continue;
+            }
+
+            if (num_frames_to_read == 0) {
+                Sleep(sleep_time);
+                continue;
+            }
+
+            // 处理音频数据
+            if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
+                std::lock_guard<std::mutex> lock(queue_mutex_);
+                AudioBuffer buffer(reinterpret_cast<float*>(data), num_frames_to_read);
+                buffer_queue_.push(buffer);
+            }
+
+            // 释放缓冲区
+            hr = capture_client_->ReleaseBuffer(num_frames_to_read);
+            if (FAILED(hr)) {
+                std::cerr << "Failed to release capture buffer: " << GetErrorMessage(hr) << std::endl;
+                break;
             }
         }
     }
 
     bool setup_audio_client() {
-        // 设置音频格式
-        wave_format_.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-        wave_format_.nChannels = 1;  // 单声道
-        wave_format_.nSamplesPerSec = SAMPLE_RATE;
-        wave_format_.wBitsPerSample = 32;  // float格式
-        wave_format_.nBlockAlign = (wave_format_.nChannels * wave_format_.wBitsPerSample) / 8;
-        wave_format_.nAvgBytesPerSec = wave_format_.nSamplesPerSec * wave_format_.nBlockAlign;
-        wave_format_.cbSize = 0;
-
         // 创建音频客户端
         IMMDeviceEnumerator* enumerator = nullptr;
         IMMDevice* device = nullptr;
         HRESULT hr;
 
+        std::cout << "Creating device enumerator..." << std::endl;
         hr = CoCreateInstance(
             __uuidof(MMDeviceEnumerator), nullptr,
             CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
             (void**)&enumerator
         );
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) {
+            std::cerr << "Failed to create device enumerator: " << GetErrorMessage(hr) << std::endl;
+            return false;
+        }
 
+        // 获取默认音频输出设备
+        std::cout << "Getting default audio endpoint..." << std::endl;
         hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
         if (FAILED(hr)) {
+            std::cerr << "Failed to get default audio endpoint: " << GetErrorMessage(hr) << std::endl;
             enumerator->Release();
             return false;
         }
 
+        std::cout << "Activating audio client..." << std::endl;
         hr = device->Activate(
             __uuidof(IAudioClient), CLSCTX_ALL,
             nullptr, (void**)&audio_client_
@@ -134,36 +166,119 @@ private:
         device->Release();
         enumerator->Release();
 
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) {
+            std::cerr << "Failed to activate audio client: " << GetErrorMessage(hr) << std::endl;
+            return false;
+        }
 
-        // 初始化音频客户端
+        // 获取当前音频格式
+        WAVEFORMATEX* device_format = nullptr;
+        hr = audio_client_->GetMixFormat(&device_format);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to get mix format: " << GetErrorMessage(hr) << std::endl;
+            return false;
+        }
+
+        // 打印原始格式信息
+        std::cout << "Original format:" << std::endl;
+        std::cout << "  Sample rate: " << device_format->nSamplesPerSec << std::endl;
+        std::cout << "  Channels: " << device_format->nChannels << std::endl;
+        std::cout << "  Bits per sample: " << device_format->wBitsPerSample << std::endl;
+        std::cout << "  Format tag: 0x" << std::hex << device_format->wFormatTag << std::dec << std::endl;
+
+        // 检查是否是WAVE_FORMAT_EXTENSIBLE格式
+        if (device_format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+            WAVEFORMATEXTENSIBLE* format_ext = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(device_format);
+            std::cout << "  Sub format: " << std::hex 
+                      << format_ext->SubFormat.Data1 << "-"
+                      << format_ext->SubFormat.Data2 << "-"
+                      << format_ext->SubFormat.Data3 << std::dec << std::endl;
+        }
+
+        // 使用设备的原生格式
+        size_t format_size = sizeof(WAVEFORMATEX);
+        if (device_format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+            format_size = sizeof(WAVEFORMATEXTENSIBLE);
+        }
+        memcpy(&wave_format_, device_format, format_size);
+        
+        CoTaskMemFree(device_format);
+
+        // 计算缓冲区持续时间
+        REFERENCE_TIME default_period = 0, min_period = 0;
+        hr = audio_client_->GetDevicePeriod(&default_period, &min_period);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to get device period: " << GetErrorMessage(hr) << std::endl;
+            return false;
+        }
+
+        std::cout << "Initializing audio client..." << std::endl;
+        
+        // 使用更简单的标志组合
+        const DWORD stream_flags = AUDCLNT_STREAMFLAGS_LOOPBACK;
+        const REFERENCE_TIME buffer_duration = default_period * 2;  // 使用两倍的默认周期
+
         hr = audio_client_->Initialize(
             AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-            REFTIMES_PER_SEC / 100,  // 10ms buffer
+            stream_flags,
+            buffer_duration,
             0,
             &wave_format_,
             nullptr
         );
-        if (FAILED(hr)) return false;
 
-        // 获取渲染客户端
+        if (FAILED(hr)) {
+            std::cerr << "Failed to initialize audio client with error: " << GetErrorMessage(hr) 
+                      << " (0x" << std::hex << hr << ")" << std::endl;
+            std::cerr << "Attempted initialization with:" << std::endl;
+            std::cerr << "  Share mode: AUDCLNT_SHAREMODE_SHARED" << std::endl;
+            std::cerr << "  Stream flags: 0x" << std::hex << stream_flags << std::dec << std::endl;
+            std::cerr << "  Buffer duration: " << buffer_duration << " (100ns units)" << std::endl;
+            std::cerr << "  Wave format:" << std::endl;
+            std::cerr << "    Format tag: 0x" << std::hex << wave_format_.wFormatTag << std::dec << std::endl;
+            std::cerr << "    Channels: " << wave_format_.nChannels << std::endl;
+            std::cerr << "    Sample rate: " << wave_format_.nSamplesPerSec << std::endl;
+            std::cerr << "    Bits per sample: " << wave_format_.wBitsPerSample << std::endl;
+            std::cerr << "    Block align: " << wave_format_.nBlockAlign << std::endl;
+            std::cerr << "    Avg bytes per sec: " << wave_format_.nAvgBytesPerSec << std::endl;
+            return false;
+        }
+
+        // 获取实际的缓冲区大小
+        UINT32 buffer_size;
+        hr = audio_client_->GetBufferSize(&buffer_size);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to get buffer size: " << GetErrorMessage(hr) << std::endl;
+            return false;
+        }
+
+        std::cout << "Getting capture client..." << std::endl;
         hr = audio_client_->GetService(
-            __uuidof(IAudioRenderClient),
-            (void**)&render_client_
+            __uuidof(IAudioCaptureClient),
+            (void**)&capture_client_
         );
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) {
+            std::cerr << "Failed to get capture client: " << GetErrorMessage(hr) << std::endl;
+            return false;
+        }
 
-        // 设置事件
-        hr = audio_client_->SetEventHandle(audio_event_);
-        if (FAILED(hr)) return false;
+        std::cout << "Audio configuration:" << std::endl;
+        std::cout << "  Format: " << wave_format_.nSamplesPerSec << "Hz, "
+                  << wave_format_.nChannels << " channels, "
+                  << wave_format_.wBitsPerSample << " bits" << std::endl;
+        std::cout << "  Default period: " << default_period << " (100ns units)" << std::endl;
+        std::cout << "  Minimum period: " << min_period << " (100ns units)" << std::endl;
+        std::cout << "  Buffer size: " << buffer_size << " frames" << std::endl;
+        std::cout << "  Buffer duration: " << buffer_duration << " (100ns units)" << std::endl;
 
+        std::cout << "Audio client setup completed successfully" << std::endl;
         return true;
     }
 
 public:
-    VirtualAudioDevice() : running_(false), audio_client_(nullptr), render_client_(nullptr),
-                          audio_event_(nullptr), render_thread_handle_(nullptr), task_index_(0) {
+    VirtualAudioDevice() : running_(false), audio_client_(nullptr), capture_client_(nullptr),
+                          render_client_(nullptr), audio_event_(nullptr), 
+                          render_thread_handle_(nullptr), task_index_(0) {
         wasapi_capture_ = wasapi_capture_create();
     }
 
@@ -226,6 +341,11 @@ public:
         }
 
         wasapi_capture_stop(wasapi_capture_);
+
+        if (capture_client_) {
+            capture_client_->Release();
+            capture_client_ = nullptr;
+        }
 
         if (render_client_) {
             render_client_->Release();

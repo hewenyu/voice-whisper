@@ -155,23 +155,24 @@ struct whisper_params {
     int32_t capture_id = -1;
     int32_t max_tokens = 32;
     int32_t audio_ctx  = 0;
-    int32_t app_pid    = 0;     // 新增：指定要捕获的应用程序 PID
+    int32_t app_pid    = 0;
 
     float vad_thold    = 0.6f;
     float freq_thold   = 100.0f;
 
     bool translate     = false;
-    bool no_context    = true;
+    bool no_fallback   = false;
     bool print_special = false;
+    bool no_context    = true;
     bool no_timestamps = false;
     bool tinydiarize   = false;
-    bool save_audio    = false; // save audio to wav file
+    bool save_audio    = false;
     bool use_gpu       = true;
     bool flash_attn    = false;
-    bool list_apps     = false;  // 新增：是否列出可用应用
+    bool list_apps     = false;
 
     std::string language  = "en";
-    std::string model     = "../models/ggml-base.en.bin";
+    std::string model    = "../models/ggml-base.en.bin";
     std::string fname_out;
 };
 
@@ -202,8 +203,8 @@ bool whisper_params_parse(int argc, char ** argv, whisper_params & params) {
         else if (arg == "-sa"   || arg == "--save-audio")    { params.save_audio    = true; }
         else if (arg == "-ng"   || arg == "--no-gpu")        { params.use_gpu       = false; }
         else if (arg == "-fa"   || arg == "--flash-attn")    { params.flash_attn    = true; }
-        else if (arg == "-la"   || arg == "--list-apps")     { params.list_apps     = true; }  // 新增
-        else if (arg == "-pid"  || arg == "--app-pid")       { params.app_pid       = std::stoi(argv[++i]); }  // 新增
+        else if (arg == "-la"   || arg == "--list-apps")     { params.list_apps     = true; }
+        else if (arg == "-pid"  || arg == "--app-pid")       { params.app_pid       = std::stoi(argv[++i]); }
         else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
             whisper_print_usage(argc, argv, params);
@@ -237,8 +238,8 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "  -sa,      --save-audio    [%-7s] save the recorded audio to a file\n",              params.save_audio ? "true" : "false");
     fprintf(stderr, "  -ng,      --no-gpu        [%-7s] disable GPU inference\n",                          params.use_gpu ? "false" : "true");
     fprintf(stderr, "  -fa,      --flash-attn    [%-7s] flash attention during inference\n",               params.flash_attn ? "true" : "false");
-    fprintf(stderr, "  -la,      --list-apps     list available applications for capture\n");  // 新增
-    fprintf(stderr, "  -pid N,   --app-pid N     capture audio from specific application PID\n");  // 新增
+    fprintf(stderr, "  -la,      --list-apps     list available applications for capture\n");
+    fprintf(stderr, "  -pid N,   --app-pid N     capture audio from specific application PID\n");
     fprintf(stderr, "\n");
 }
 
@@ -507,9 +508,10 @@ int main(int argc, char ** argv) {
             wparams.n_threads        = params.n_threads;
 
             wparams.audio_ctx        = params.audio_ctx;
-            
+            wparams.tdrz_enable      = params.tinydiarize;
+
             // disable temperature fallback
-            wparams.temperature_inc  = 0.0f;
+            wparams.temperature_inc  = params.no_fallback ? 0.0f : wparams.temperature_inc;
 
             wparams.prompt_tokens    = params.no_context ? nullptr : prompt_tokens.data();
             wparams.prompt_n_tokens  = params.no_context ? 0       : prompt_tokens.size();
@@ -519,14 +521,12 @@ int main(int argc, char ** argv) {
                 return 7;
             }
 
-            // print result;
+            // print result
             {
                 if (!use_vad) {
                     printf("\33[2K\r");
-
                     // print long empty line to clear the previous line
                     printf("%s", std::string(100, ' ').c_str());
-
                     printf("\33[2K\r");
                 } else {
                     const int64_t t1 = (t_last - t_start).count()/1000000;

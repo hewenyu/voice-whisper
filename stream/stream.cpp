@@ -111,7 +111,11 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "\n");
 }
 
+#ifdef _WIN32
+extern "C" int main(int argc, char ** argv) {
+#else
 int main(int argc, char ** argv) {
+#endif
     whisper_params params;
 
     if (whisper_params_parse(argc, argv, params) == false) {

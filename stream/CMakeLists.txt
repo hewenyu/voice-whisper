@@ -18,14 +18,28 @@ target_include_directories(whisper-stream PRIVATE
 )
 
 target_compile_definitions(whisper-stream PRIVATE
-    SDL_MAIN_HANDLED
-)
-
-target_link_libraries(whisper-stream PRIVATE
-    whisper
-    ${SDL2_LIBRARIES}
+    HAVE_SDL2
 )
 
 if(WIN32)
     target_link_libraries(whisper-stream PRIVATE winmm)
-endif() 
+    
+    # Windows subsystem settings
+    if(MSVC)
+        set_target_properties(whisper-stream PROPERTIES
+            WIN32_EXECUTABLE FALSE
+        )
+    else()
+        set_target_properties(whisper-stream PROPERTIES
+            WIN32_EXECUTABLE FALSE
+        )
+        target_link_options(whisper-stream PRIVATE -mconsole)
+    endif()
+endif()
+
+# Link libraries in the correct order
+target_link_libraries(whisper-stream PRIVATE
+    SDL2::SDL2main
+    SDL2::SDL2
+    whisper
+) 

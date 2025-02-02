@@ -14,6 +14,12 @@
 #include <fstream>
 #include <ctime>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 // command-line parameters
 struct whisper_params {
     int32_t n_threads  = std::min(4, (int32_t) std::thread::hardware_concurrency());
@@ -113,6 +119,10 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
 
 #ifdef _WIN32
 extern "C" int main(int argc, char ** argv) {
+    // Set console output to UTF-8
+    SetConsoleOutputCP(CP_UTF8);
+    // Enable buffering to prevent VS from chopping up UTF-8 byte sequences
+    setvbuf(stdout, nullptr, _IOFBF, 1000);
 #else
 int main(int argc, char ** argv) {
 #endif

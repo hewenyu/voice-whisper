@@ -1,39 +1,21 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.12)
+project(whisper-stream)
 
-# 设置项目名称
-project(stream)
+# Find SDL2
+find_package(SDL2 REQUIRED)
 
-# 设置C++标准
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_executable(whisper-stream stream.cpp)
 
-# 设置输出目录
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-
-# 添加可执行文件
-add_executable(stream
-    stream.cpp
-    ${CMAKE_SOURCE_DIR}/dep/whisper.cpp/examples/common.cpp
-    ${CMAKE_SOURCE_DIR}/dep/whisper.cpp/examples/common-sdl.cpp
-)
-
-# 包含头文件目录
-target_include_directories(stream PRIVATE
-    ${CMAKE_SOURCE_DIR}/dep/whisper.cpp/examples
+target_include_directories(whisper-stream PRIVATE
+    ${SDL2_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/dep/whisper.cpp
 )
 
-# 链接依赖库
-target_link_libraries(stream PRIVATE
+target_link_libraries(whisper-stream PRIVATE
     whisper
-    SDL2::SDL2main
-    SDL2::SDL2
-    audio_capture
+    ${SDL2_LIBRARIES}
 )
 
 if(WIN32)
-    target_link_libraries(stream PRIVATE
-        ole32
-        oleaut32
-    )
+    target_link_libraries(whisper-stream PRIVATE winmm)
 endif() 

@@ -2,9 +2,9 @@
 //
 // A very quick-n-dirty implementation serving mainly as a proof of concept.
 //
-#include "common-sdl.h"
-#include "common.h"
-#include "whisper.h"
+#include "../dep/whisper.cpp/examples/common-sdl.h"
+#include "../dep/whisper.cpp/examples/common.h"
+#include "../dep/whisper.cpp/whisper.h"
 
 #include <cassert>
 #include <cstdio>
@@ -12,7 +12,7 @@
 #include <thread>
 #include <vector>
 #include <fstream>
-
+#include <ctime>
 
 // command-line parameters
 struct whisper_params {
@@ -72,7 +72,6 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-sa"   || arg == "--save-audio")    { params.save_audio    = true; }
         else if (arg == "-ng"   || arg == "--no-gpu")        { params.use_gpu       = false; }
         else if (arg == "-fa"   || arg == "--flash-attn")    { params.flash_attn    = true; }
-
         else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
             whisper_print_usage(argc, argv, params);
@@ -112,6 +111,78 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "\n");
 }
 
+class wav_writer {
+public:
+    wav_writer() : file(nullptr) {}
+    ~wav_writer() { close(); }
+
+    bool open(const std::string & fname, int sample_rate, int channels, int bits_per_sample) {
+        close();
+        file = fopen(fname.c_str(), "wb");
+        if (!file) return false;
+
+        // write WAV header
+        uint32_t data_size = 0;
+        uint32_t file_size = data_size + 44 - 8;
+
+        // RIFF header
+        fwrite("RIFF", 1, 4, file);
+        fwrite(&file_size, 1, 4, file);
+        fwrite("WAVE", 1, 4, file);
+
+        // fmt chunk
+        uint16_t fmt_chunk[] = {
+            0x666D, 0x7420, 0x1000, 0x0000, 0x0100, 0x0100, 0x44AC, 0x0000,
+            0x88, 0x58, 0x01, 0x00, 0x0200, 0x1000
+        };
+        fmt_chunk[4] = channels;
+        fmt_chunk[5] = bits_per_sample;
+        fmt_chunk[6] = sample_rate;
+        fmt_chunk[7] = sample_rate * channels * bits_per_sample / 8;
+        fmt_chunk[8] = channels * bits_per_sample / 8;
+        fwrite(fmt_chunk, 1, sizeof(fmt_chunk), file);
+
+        // data chunk
+        fwrite("data", 1, 4, file);
+        fwrite(&data_size, 1, 4, file);
+
+        return true;
+    }
+
+    void write(const float * data, size_t n) {
+        if (!file) return;
+
+        // convert float to int16_t
+        std::vector<int16_t> buf(n);
+        for (size_t i = 0; i < n; i++) {
+            buf[i] = data[i] * 32768.0f;
+        }
+
+        fwrite(buf.data(), 2, n, file);
+    }
+
+    void close() {
+        if (file) {
+            // update WAV header with final size
+            long file_size = ftell(file);
+            long data_size = file_size - 44;
+
+            fseek(file, 4, SEEK_SET);
+            uint32_t size = file_size - 8;
+            fwrite(&size, 1, 4, file);
+
+            fseek(file, 40, SEEK_SET);
+            fwrite(&data_size, 1, 4, file);
+
+            fclose(file);
+            file = nullptr;
+        }
+    }
+
+private:
+    FILE * file;
+};
+
 int main(int argc, char ** argv) {
     whisper_params params;
 
@@ -136,7 +207,6 @@ int main(int argc, char ** argv) {
     params.max_tokens     = 0;
 
     // init audio
-
     audio_async audio(params.length_ms);
     if (!audio.init(params.capture_id, WHISPER_SAMPLE_RATE)) {
         fprintf(stderr, "%s: audio.init() failed!\n", __func__);
@@ -146,20 +216,19 @@ int main(int argc, char ** argv) {
     audio.resume();
 
     // whisper init
-    if (params.language != "auto" && whisper_lang_id(params.language.c_str()) == -1){
+    if (params.language != "auto" && whisper_lang_id(params.language.c_str()) == -1) {
         fprintf(stderr, "error: unknown language '%s'\n", params.language.c_str());
         whisper_print_usage(argc, argv, params);
         exit(0);
     }
 
     struct whisper_context_params cparams = whisper_context_default_params();
-
-    cparams.use_gpu    = params.use_gpu;
+    cparams.use_gpu = params.use_gpu;
     cparams.flash_attn = params.flash_attn;
 
     struct whisper_context * ctx = whisper_init_from_file_with_params(params.model.c_str(), cparams);
 
-    std::vector<float> pcmf32    (n_samples_30s, 0.0f);
+    std::vector<float> pcmf32(n_samples_30s, 0.0f);
     std::vector<float> pcmf32_old;
     std::vector<float> pcmf32_new(n_samples_30s, 0.0f);
 
@@ -196,7 +265,6 @@ int main(int argc, char ** argv) {
     }
 
     int n_iter = 0;
-
     bool is_running = true;
 
     std::ofstream fout;
@@ -219,10 +287,11 @@ int main(int argc, char ** argv) {
 
         wavWriter.open(filename, WHISPER_SAMPLE_RATE, 16, 1);
     }
+
     printf("[Start speaking]\n");
     fflush(stdout);
 
-    auto t_last  = std::chrono::high_resolution_clock::now();
+    auto t_last = std::chrono::high_resolution_clock::now();
     const auto t_start = t_last;
 
     // main audio loop
@@ -230,6 +299,7 @@ int main(int argc, char ** argv) {
         if (params.save_audio) {
             wavWriter.write(pcmf32_new.data(), pcmf32_new.size());
         }
+
         // handle Ctrl + C
         is_running = sdl_poll_events();
 
@@ -238,7 +308,6 @@ int main(int argc, char ** argv) {
         }
 
         // process new audio
-
         if (!use_vad) {
             while (true) {
                 audio.get(params.step_ms, pcmf32_new);
@@ -274,7 +343,7 @@ int main(int argc, char ** argv) {
 
             pcmf32_old = pcmf32;
         } else {
-            const auto t_now  = std::chrono::high_resolution_clock::now();
+            const auto t_now = std::chrono::high_resolution_clock::now();
             const auto t_diff = std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count();
 
             if (t_diff < 2000) {
@@ -286,14 +355,13 @@ int main(int argc, char ** argv) {
             audio.get(2000, pcmf32_new);
 
             if (::vad_simple(pcmf32_new, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, params.freq_thold, false)) {
-                audio.get(params.length_ms, pcmf32);
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
+                audio.clear();
                 continue;
             }
 
-            t_last = t_now;
+            audio.clear();
+
+            pcmf32 = pcmf32_new;
         }
 
         // run the inference
@@ -305,21 +373,21 @@ int main(int argc, char ** argv) {
             wparams.print_realtime   = false;
             wparams.print_timestamps = !params.no_timestamps;
             wparams.translate        = params.translate;
-            wparams.single_segment   = !use_vad;
-            wparams.max_tokens       = params.max_tokens;
-            wparams.language         = params.language.c_str();
-            wparams.n_threads        = params.n_threads;
+            wparams.no_context      = true;
+            wparams.single_segment  = !use_vad;
+            wparams.max_tokens      = params.max_tokens;
+            wparams.language        = params.language.c_str();
+            wparams.n_threads       = params.n_threads;
 
-            wparams.audio_ctx        = params.audio_ctx;
-
-            wparams.tdrz_enable      = params.tinydiarize; // [TDRZ]
+            wparams.audio_ctx       = params.audio_ctx;
+            wparams.speed_up       = false;
 
             // disable temperature fallback
-            //wparams.temperature_inc  = -1.0f;
             wparams.temperature_inc  = params.no_fallback ? 0.0f : wparams.temperature_inc;
+            wparams.entropy_thold   = params.no_fallback ? 1.0f : wparams.entropy_thold;
 
             wparams.prompt_tokens    = params.no_context ? nullptr : prompt_tokens.data();
-            wparams.prompt_n_tokens  = params.no_context ? 0       : prompt_tokens.size();
+            wparams.prompt_n_tokens = params.no_context ? 0       : prompt_tokens.size();
 
             if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
                 fprintf(stderr, "%s: failed to process audio\n", argv[0]);
@@ -335,13 +403,6 @@ int main(int argc, char ** argv) {
                     printf("%s", std::string(100, ' ').c_str());
 
                     printf("\33[2K\r");
-                } else {
-                    const int64_t t1 = (t_last - t_start).count()/1000000;
-                    const int64_t t0 = std::max(0.0, t1 - pcmf32.size()*1000.0/WHISPER_SAMPLE_RATE);
-
-                    printf("\n");
-                    printf("### Transcription %d START | t0 = %d ms | t1 = %d ms\n", n_iter, (int) t0, (int) t1);
-                    printf("\n");
                 }
 
                 const int n_segments = whisper_full_n_segments(ctx);
@@ -359,55 +420,36 @@ int main(int argc, char ** argv) {
                         const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
                         const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
 
-                        std::string output = "[" + to_timestamp(t0, false) + " --> " + to_timestamp(t1, false) + "]  " + text;
-
-                        if (whisper_full_get_segment_speaker_turn_next(ctx, i)) {
-                            output += " [SPEAKER_TURN]";
-                        }
-
-                        output += "\n";
-
-                        printf("%s", output.c_str());
-                        fflush(stdout);
+                        printf ("[%s --> %s]  %s\n", to_timestamp(t0).c_str(), to_timestamp(t1).c_str(), text);
 
                         if (params.fname_out.length() > 0) {
-                            fout << output;
+                            fout << "[" << to_timestamp(t0) << " --> " << to_timestamp(t1) << "]  " << text << std::endl;
                         }
                     }
                 }
 
-                if (params.fname_out.length() > 0) {
-                    fout << std::endl;
-                }
-
-                if (use_vad) {
+                if (params.no_timestamps) {
                     printf("\n");
-                    printf("### Transcription %d END\n", n_iter);
                 }
-            }
 
-            ++n_iter;
+                if (!use_vad && (n_iter % n_new_line) == 0) {
+                    printf("\n");
 
-            if (!use_vad && (n_iter % n_new_line) == 0) {
-                printf("\n");
-
-                // keep part of the audio for next iteration to try to mitigate word boundary issues
-                pcmf32_old = std::vector<float>(pcmf32.end() - n_samples_keep, pcmf32.end());
-
-                // Add tokens of the last full length segment as the prompt
-                if (!params.no_context) {
-                    prompt_tokens.clear();
-
-                    const int n_segments = whisper_full_n_segments(ctx);
-                    for (int i = 0; i < n_segments; ++i) {
-                        const int token_count = whisper_full_n_tokens(ctx, i);
-                        for (int j = 0; j < token_count; ++j) {
-                            prompt_tokens.push_back(whisper_full_get_token_id(ctx, i, j));
-                        }
+                    if (params.fname_out.length() > 0) {
+                        fout << std::endl;
                     }
                 }
+
+                ++n_iter;
+
+                if (params.no_context) {
+                    prompt_tokens.clear();
+                } else {
+                    // keep the last token in the prompt
+                    prompt_tokens.resize(1);
+                    prompt_tokens[0] = whisper_full_get_segment_token(ctx, n_segments - 1, -1);
+                }
             }
-            fflush(stdout);
         }
     }
 
@@ -417,4 +459,4 @@ int main(int argc, char ** argv) {
     whisper_free(ctx);
 
     return 0;
-}
+} 

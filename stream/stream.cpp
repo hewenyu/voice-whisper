@@ -2,9 +2,9 @@
 //
 // A very quick-n-dirty implementation serving mainly as a proof of concept.
 //
-#include "../dep/whisper.cpp/examples/common-sdl.h"
-#include "../dep/whisper.cpp/examples/common.h"
-#include "../dep/whisper.cpp/whisper.h"
+#include "common-sdl.h"
+#include "common.h"
+#include "whisper.h"
 
 #include <cassert>
 #include <cstdio>

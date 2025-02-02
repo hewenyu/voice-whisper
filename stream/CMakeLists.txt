@@ -9,6 +9,8 @@ add_executable(whisper-stream stream.cpp)
 target_include_directories(whisper-stream PRIVATE
     ${SDL2_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/dep/whisper.cpp
+    ${CMAKE_SOURCE_DIR}/dep/whisper.cpp/examples
+    ${CMAKE_SOURCE_DIR}/dep/whisper.cpp/include
 )
 
 target_link_libraries(whisper-stream PRIVATE

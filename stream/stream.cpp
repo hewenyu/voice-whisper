@@ -2,6 +2,7 @@
 //
 // A very quick-n-dirty implementation serving mainly as a proof of concept.
 //
+#define SDL_MAIN_HANDLED
 #include "common-sdl.h"
 #include "common.h"
 #include "whisper.h"
@@ -111,78 +112,6 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "\n");
 }
 
-class wav_writer {
-public:
-    wav_writer() : file(nullptr) {}
-    ~wav_writer() { close(); }
-
-    bool open(const std::string & fname, int sample_rate, int channels, int bits_per_sample) {
-        close();
-        file = fopen(fname.c_str(), "wb");
-        if (!file) return false;
-
-        // write WAV header
-        uint32_t data_size = 0;
-        uint32_t file_size = data_size + 44 - 8;
-
-        // RIFF header
-        fwrite("RIFF", 1, 4, file);
-        fwrite(&file_size, 1, 4, file);
-        fwrite("WAVE", 1, 4, file);
-
-        // fmt chunk
-        uint16_t fmt_chunk[] = {
-            0x666D, 0x7420, 0x1000, 0x0000, 0x0100, 0x0100, 0x44AC, 0x0000,
-            0x88, 0x58, 0x01, 0x00, 0x0200, 0x1000
-        };
-        fmt_chunk[4] = channels;
-        fmt_chunk[5] = bits_per_sample;
-        fmt_chunk[6] = sample_rate;
-        fmt_chunk[7] = sample_rate * channels * bits_per_sample / 8;
-        fmt_chunk[8] = channels * bits_per_sample / 8;
-        fwrite(fmt_chunk, 1, sizeof(fmt_chunk), file);
-
-        // data chunk
-        fwrite("data", 1, 4, file);
-        fwrite(&data_size, 1, 4, file);
-
-        return true;
-    }
-
-    void write(const float * data, size_t n) {
-        if (!file) return;
-
-        // convert float to int16_t
-        std::vector<int16_t> buf(n);
-        for (size_t i = 0; i < n; i++) {
-            buf[i] = data[i] * 32768.0f;
-        }
-
-        fwrite(buf.data(), 2, n, file);
-    }
-
-    void close() {
-        if (file) {
-            // update WAV header with final size
-            long file_size = ftell(file);
-            long data_size = file_size - 44;
-
-            fseek(file, 4, SEEK_SET);
-            uint32_t size = file_size - 8;
-            fwrite(&size, 1, 4, file);
-
-            fseek(file, 40, SEEK_SET);
-            fwrite(&data_size, 1, 4, file);
-
-            fclose(file);
-            file = nullptr;
-        }
-    }
-
-private:
-    FILE * file;
-};
-
 int main(int argc, char ** argv) {
     whisper_params params;
 
@@ -277,7 +206,6 @@ int main(int argc, char ** argv) {
     }
 
     wav_writer wavWriter;
-    // save wav file
     if (params.save_audio) {
         // Get current date/time for filename
         time_t now = time(0);
@@ -331,8 +259,6 @@ int main(int argc, char ** argv) {
             // take up to params.length_ms audio from previous iteration
             const int n_samples_take = std::min((int) pcmf32_old.size(), std::max(0, n_samples_keep + n_samples_len - n_samples_new));
 
-            //printf("processing: take = %d, new = %d, old = %d\n", n_samples_take, n_samples_new, (int) pcmf32_old.size());
-
             pcmf32.resize(n_samples_new + n_samples_take);
 
             for (int i = 0; i < n_samples_take; i++) {
@@ -378,9 +304,7 @@ int main(int argc, char ** argv) {
             wparams.max_tokens      = params.max_tokens;
             wparams.language        = params.language.c_str();
             wparams.n_threads       = params.n_threads;
-
             wparams.audio_ctx       = params.audio_ctx;
-            wparams.speed_up       = false;
 
             // disable temperature fallback
             wparams.temperature_inc  = params.no_fallback ? 0.0f : wparams.temperature_inc;
@@ -446,8 +370,7 @@ int main(int argc, char ** argv) {
                     prompt_tokens.clear();
                 } else {
                     // keep the last token in the prompt
-                    prompt_tokens.resize(1);
-                    prompt_tokens[0] = whisper_full_get_segment_token(ctx, n_segments - 1, -1);
+                    prompt_tokens.resize(0);
                 }
             }
         }
